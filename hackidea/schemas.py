@@ -50,10 +50,12 @@ CANDIDATES_SCHEMA = {
     "required": ["candidates"],
     "properties": {"candidates": {"type": "array", "minItems": 1, "items": {
         "type": "object",
-        "required": ["name", "pitch", "target_user", "ai_core", "why_now", "angle"],
+        "required": ["name", "pitch", "problem", "target_user", "ai_core", "why_now", "angle"],
         "properties": {
             "name": {"type": "string", "minLength": 2},
             "pitch": {"type": "string", "minLength": 10},
+            "problem": {"type": "string", "minLength": 10},
+            "evidence_url": {"type": "string", "minLength": 8},
             "target_user": {"type": "string"},
             "ai_core": {"type": "string", "minLength": 10},
             "why_now": {"type": "string"},
@@ -156,6 +158,21 @@ DECISION_SCHEMA = {
             "properties": {"point": {"type": "string"}, "evidence_url": {"type": "string"}},
         }},
         "rationale": {"type": "string"},
+    },
+}
+
+BLUEPRINT_CONFIG_SCHEMA = {
+    "type": "object",
+    "required": ["frontend", "backend", "database", "primary_ai", "fallback_ai",
+                 "hosting", "auth", "integrations", "claims"],
+    "properties": {
+        "frontend": {"type": "string"}, "backend": {"type": "string"},
+        "database": {"type": "string"}, "primary_ai": {"type": "string"},
+        "fallback_ai": {"type": "string"}, "hosting": {"type": "string"},
+        "auth": {"type": "string"}, "integrations": {"type": "array", "items": {"type": "string"}},
+        "claims": {"type": "array", "items": {"type": "object",
+            "required": ["claim", "evidence_url"],
+            "properties": {"claim": {"type": "string"}, "evidence_url": {"type": "string"}}}},
     },
 }
 

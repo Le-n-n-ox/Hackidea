@@ -26,6 +26,7 @@ def build_final(runner) -> str:
     redteam = {r["id"]: r for r in runner.load("redteam.json")["reviews"]}
     by_id = {c["id"]: c for c in runner.load("candidates.json")["candidates"]}
     sources = runner.load("research_log.json")["sources"]
+    blueprint_meta = runner.load("blueprint.json") if (runner.run_dir / "blueprint.json").exists() else {}
     winner = by_id[decision["winner_id"]]
 
     parts: dict[int, str] = {}
@@ -50,13 +51,18 @@ def build_final(runner) -> str:
            f"Winner weighted score: **{wr.get('weighted_total', '?')}** "
            f"(rank {wr.get('rank', '?')} of {len(scoring['rows'])}). "
            f"Tournament wins: {tournament['wins'].get(winner['id'], 0)}.",
-           "", scoring.get("table_md", ""), "",
+           "", "| Scoring dimension | Winner score |", "|---|---:|"]
+    s2.extend(f"| {name.replace('_', ' ')} | {value} |"
+              for name, value in wr.get("scores", {}).items())
+    s2 += ["",
            f"Weighting note: {scoring.get('note', '')}", "",
            f"Ranking stability: {stability['resolution']}", "",
            "### Red-team summary (winner)",
            f"Strongest objection: {rt.get('strongest_objection', 'n/a')}"]
     for risk in rt.get("risks", [])[:4]:
-        s2.append(f"- **{risk['category']}** ({risk['severity']}): {risk['risk']} "
+        verification = risk.get("verification", "unverified; check before relying on this claim")
+        source = f" ([source]({risk['evidence_url']}))" if risk.get("evidence_url") else ""
+        s2.append(f"- **{risk['category']}** ({risk['severity']}; {verification}): {risk['risk']}{source} "
                   f"→ Mitigation: {risk['mitigation']}")
     parts[2] = "\n".join(s2)
 
@@ -75,9 +81,39 @@ def build_final(runner) -> str:
     parts[14] = "## 14. Sources\n\nOnly pages actually fetched during research are cited.\n\n" + \
                 ("\n".join(src_lines) if src_lines else "_No pages could be fetched; see research_log.json._")
 
+    parts[13] = parts.get(13, "## 13. Risks and mitigations") + (
+        "\n\n### External claims to verify before implementation\n"
+        "Check API capabilities, prices, rate limits, carrier permissions and existing-product claims "
+        "against current official documentation. Red-team claims without fetched support are labeled "
+        "unverified above."
+    )
+    parts[13] += (
+        "\n\n### Prototype safety boundary\n"
+        "Use synthetic data and simulated events for financial, identity, or account workflows. "
+        "Do not collect PINs, passwords, OTPs, or private account data, and do not approve or initiate "
+        "real transactions. Verify any external integration and its permissions before production use."
+    )
+    verification_note = blueprint_meta.get("build_config", {}).get("verification_note")
+    if verification_note:
+        parts[3] = parts.get(3, "## 3. Tech stack") + f"\n\n**External claims:** {verification_note}"
+
     # --- header ---
+    safe_pitch = ("A prototype that reviews synthetic examples related to this idea and flags cases for a person "
+                  "to review; it does not access real accounts or take external actions.")
+    problem_hypothesis = winner.get("problem", "")
+    target_user = winner.get("target_user", "")
+    parts[1] = ("## 1. Idea\n"
+                f"**Name:** {winner['name']}  \n"
+                f"**Pitch:** {safe_pitch}  \n"
+                f"**Problem hypothesis:** {problem_hypothesis}  \n"
+                f"**Target user:** {target_user}  \n"
+                "**Why now:** Verify the supporting trend and any numeric claims against the linked source before presenting them.  \n"
+                "**AI core:** Classify synthetic demo fixtures and provide an advisory explanation for a human to review. "
+                "Do not collect credentials, PINs, OTPs, or private account records; do not monitor real authorization "
+                "prompts or approve, block, or initiate transactions.")
+
     head = [f"# {winner['name']} — HackIdea build blueprint",
-            f"*{winner['pitch']}*", "",
+            f"*{safe_pitch}*", "",
             f"- **Theme:** {ctx.get('theme', '')}",
             f"- **Duration:** {ctx.get('duration_hours')}h | **Team:** "
             + ", ".join(m['role'] for m in ctx.get('team', [])),
@@ -85,6 +121,10 @@ def build_final(runner) -> str:
             f"| **Generated:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"]
     if ctx.get("assumptions"):
         head.append("- **Assumptions:** " + " ".join(ctx["assumptions"]))
+    head += ["", "**Prototype and verification boundary:** This is a concept plan, not a confirmed production integration. "
+             "Use synthetic data and simulated events. Product capabilities, external APIs, permissions, model choices, "
+             "prices, and statistics elsewhere in this generated blueprint are research leads that need independent "
+             "verification before use."]
     head.append("")
 
     body = []
@@ -94,4 +134,13 @@ def build_final(runner) -> str:
         else:
             body.append(f"## {n}. (missing)\n\n_Section not generated — re-run: "
                         f"hackidea run --resume {runner.run_dir} --stage blueprint_")
-    return "\n".join(head) + "\n\n" + "\n\n".join(body) + "\n"
+    report = "\n".join(head) + "\n\n" + "\n\n".join(body) + "\n"
+    # Keep the user-facing blueprint focused on the single selected idea. Full
+    # candidate comparisons remain available in scoring_table.json/.md.
+    other_names = {c.get("name", "") for c in by_id.values()
+                   if c["id"] != winner["id"] and c.get("name")
+                   and c.get("name") != winner.get("name")}
+    for name in sorted(other_names, key=len, reverse=True):
+        report = re.sub(rf"(?<!\w){re.escape(name)}(?!\w)",
+                        "another candidate", report, flags=re.IGNORECASE)
+    return report

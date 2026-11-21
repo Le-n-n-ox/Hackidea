@@ -1,7 +1,7 @@
 """Unit tests: weighted scoring math, weight normalization, table rendering."""
 from hackidea.config import DEFAULT_WEIGHTS
 from hackidea.stages.scoring import (DIMENSIONS, normalize_weights, weighted_total,
-                                     render_table)
+                                     render_table, map_judging_weights)
 
 
 def test_default_weights_sum_to_one():
@@ -41,3 +41,18 @@ def test_render_table():
     md = render_table(rows, DEFAULT_WEIGHTS)
     assert "MilkFlow" in md and "weighted" in md and "c01" in md
     assert md.count("\n") >= 3
+
+
+def test_judging_weights_map_to_supplied_criteria_deterministically():
+    weights, note = map_judging_weights({"impact": .30, "innovation": .30,
+                                         "technical execution": .25, "presentation": .15})
+    assert weights == {"theme_fit": .1, "ai_depth": .2, "feasibility": .2,
+                       "novelty": .15, "demo_impact": .15, "real_world_impact": .2}
+    assert abs(sum(weights.values()) - 1) < 1e-9
+    assert "technical execution" in note
+
+
+def test_unknown_judging_weights_use_documented_default():
+    weights, note = map_judging_weights({"community spirit": 1})
+    assert weights == DEFAULT_WEIGHTS
+    assert "community spirit" in note

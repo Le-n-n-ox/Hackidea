@@ -41,6 +41,12 @@ class Runner:
         p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
         return p
 
+    def save_text(self, name: str, value: str) -> Path:
+        assert self.run_dir is not None
+        p = self.run_dir / name
+        p.write_text(value, encoding="utf-8")
+        return p
+
     def load(self, name: str):
         p = self.run_dir / name
         if not p.exists():
@@ -49,6 +55,9 @@ class Runner:
 
     def log(self, msg: str) -> None:
         print(f"[hackidea] {msg}", file=sys.stderr, flush=True)
+
+    def llm_request_count(self) -> int:
+        return int(getattr(self.llm, "request_count", len(getattr(self.llm, "calls", []))))
 
     # ---- pipeline ----
     def run(self, context_text: str | None = None, resume_from: str | None = None,
@@ -75,6 +84,7 @@ class Runner:
             self.new_run()
         state_path = self.run_dir / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"completed": []}
+        state.setdefault("stage_runs", [])
         if (self.run_dir / "context.json").exists():
             self.ctx = self.load("context.json")
 
@@ -87,16 +97,38 @@ class Runner:
                 continue
             if i < start_idx and name != "context":
                 continue
-            if name == "context" and self.ctx and not only_stage and not resume_from:
-                state["completed"].append(name)
+            # A resume from a later stage already has its parsed context on disk.
+            # Keep it and skip extraction so we do not overwrite it with empty input.
+            if name == "context" and self.ctx and (resume_from is None or start_idx > 0) and only_stage != "context":
+                state["completed"] = list(dict.fromkeys(state["completed"] + [name]))
                 continue
             if name == "context" and not context_text and not self.ctx:
                 raise SystemExit("no context: pass --context or --resume a run dir")
             self.log(f"=== stage {i+1}/8: {name} ===")
             t0 = time.time()
-            handlers[name]()
+            calls_before = self.llm_request_count()
+            try:
+                handlers[name]()
+            except BaseException as exc:
+                calls_this_stage = self.llm_request_count() - calls_before
+                seconds = round(time.time() - t0, 1)
+                state["last_stage_seconds"] = seconds
+                state["llm_requests_last_stage"] = calls_this_stage
+                state["llm_requests_total"] = state.get("llm_requests_total", 0) + calls_this_stage
+                state["stage_runs"].append({"stage": name, "seconds": seconds,
+                                            "llm_requests": calls_this_stage,
+                                            "status": "failed", "error": type(exc).__name__})
+                state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+                raise
+            calls_this_stage = self.llm_request_count() - calls_before
             state["completed"] = [s for s in state["completed"] if s != name] + [name]
             state["last_stage_seconds"] = round(time.time() - t0, 1)
+            state["llm_requests_last_stage"] = calls_this_stage
+            state["llm_requests_total"] = state.get("llm_requests_total", 0) + calls_this_stage
+            state["stage_runs"].append({"stage": name,
+                                        "seconds": state["last_stage_seconds"],
+                                        "llm_requests": calls_this_stage,
+                                        "status": "completed"})
             state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
             self.log(f"--- {name} done in {state['last_stage_seconds']}s")
             if only_stage:
@@ -104,7 +136,9 @@ class Runner:
 
         if not only_stage or only_stage == "blueprint":
             report = build_final(self)
-            out = self.save("final_report.md", report)
+            out = self.save_text("final_report.md", report)
             self.log(f"final report: {out}")
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             print(report)
         return self.run_dir

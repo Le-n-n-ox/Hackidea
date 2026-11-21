@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from hackidea import prompts
+from hackidea import prompts, schemas
 
 PARTS = [("a", prompts.blueprint_a), ("b", prompts.blueprint_b),
          ("c", prompts.blueprint_c), ("d", prompts.blueprint_d)]
@@ -18,7 +18,17 @@ def run(runner) -> dict:
     redteam = {r["id"]: r for r in runner.load("redteam.json")["reviews"]}
     stability = runner.load("stability.json")
     sources = runner.load("research_log.json")["sources"]
-    digest = prompts.build_digest(sources, runner.preset["digest_sources"])
+    fetched_sources = [s for s in sources if s.get("fetched")]
+    digest = prompts.build_digest(fetched_sources, runner.preset["digest_sources"])
+
+    system, user = prompts.blueprint_config(ctx, winner, digest)
+    build_config = runner.llm.complete_json(system, user, schemas.BLUEPRINT_CONFIG_SCHEMA,
+                                            stage="blueprint_config", max_tokens=2200)
+    fetched_urls = {s["url"] for s in fetched_sources}
+    build_config["claims"] = [c for c in build_config["claims"] if c.get("evidence_url") in fetched_urls]
+    build_config["verification_note"] = ("Source URLs are research leads, not proof that each generated claim "
+                                          "is accurate. Check exact capabilities, prices, permissions, and limits "
+                                          "against current official documentation before use.")
 
     r = next((x for x in scoring["rows"] if x["id"] == winner["id"]), {})
     rt = redteam.get(winner["id"], {})
@@ -32,7 +42,7 @@ def run(runner) -> dict:
 
     parts = {}
     for key, fn in PARTS:
-        system, user = fn(ctx, winner, detail, digest)
+        system, user = fn(ctx, winner, detail, digest, build_config)
         user += f"\n[STAGE:blueprint_{key}]"
         text = runner.llm.chat([{"role": "system", "content": system},
                                 {"role": "user", "content": user}],
@@ -45,5 +55,6 @@ def run(runner) -> dict:
         parts[key] = text
         (runner.run_dir / f"blueprint_{key}.md").write_text(text, encoding="utf-8")
         runner.log(f"blueprint part {key}: {len(text)} chars")
-    runner.save("blueprint.json", {"winner_id": winner["id"], "parts": list(parts)})
-    return {"winner_id": winner["id"], "parts": parts}
+    runner.save("blueprint.json", {"winner_id": winner["id"], "build_config": build_config,
+                                   "parts": list(parts)})
+    return {"winner_id": winner["id"], "build_config": build_config, "parts": parts}

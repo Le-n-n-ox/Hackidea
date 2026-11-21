@@ -3,8 +3,9 @@ import pytest
 
 from hackidea.llm import extract_json, MockLLM, LLMError
 from hackidea.search import normalize_url
-from hackidea.stages.ideation import dedup_ideas, idea_similarity
-from hackidea.stages.adversarial import tournament_wins
+from hackidea.stages.ideation import dedup_ideas, idea_similarity, SIMILARITY_THRESHOLD
+from hackidea.stages.adversarial import tournament_wins, _scaled_scores, _distinct_finalists, _fallback_review
+from hackidea.stages.scoring import DEFAULT_WEIGHTS
 
 
 def test_extract_json_plain():
@@ -67,6 +68,41 @@ def test_dedup_ideas():
     assert dedup_ideas([a, b, c]) == [a, c]
 
 
+def test_dedup_uses_user_problem_not_only_names():
+    a = {"name": "AgentMilk", "problem": "Dairy coops lose payout records between collection and settlement",
+         "target_user": "dairy collection clerks", "pitch": "reconcile farmer payouts",
+         "ai_core": "entity resolution across voice notes and ledgers"}
+    near = {**a, "name": "MilkAssist", "pitch": "automatically reconcile farmer payouts"}
+    different = {"name": "SchoolFees", "problem": "Schools cannot match remittances to student balances",
+         "target_user": "school bursars", "pitch": "match student fees", "ai_core": "receipt OCR"}
+    assert idea_similarity(a, near) >= .42
+    assert len(dedup_ideas([a, near, different])) == 2
+
+
+def test_dedup_rejects_near_duplicate_mobile_money_prompt_scam_ideas():
+    ping_guard = {
+        "name": "PINGuard",
+        "problem": "Scammers send unsolicited M-Pesa PIN prompts to trick customers into authorizing fraudulent transactions, causing massive financial loss.",
+        "target_user": "Low-literacy M-Pesa users in Kenya who receive frequent PIN prompts and lack the ability to verify legitimacy independently.",
+        "pitch": "An AI agent that monitors incoming M-Pesa PIN prompts, verifies legitimacy against user history and context, and auto-decides approve or block, notifying the user and Safaricom in real time.",
+        "ai_core": "Multi-step agent that receives PIN prompt notification, pulls recent transaction history and device context, then runs a decision model to approve/flag.",
+    }
+    pesa_shield = {
+        "name": "PesaShield",
+        "problem": "Low-literacy M-Pesa users in Kenya cannot verify if a received PIN prompt is legitimate, leading to fraudulent transaction authorization",
+        "target_user": "Low-literacy M-Pesa customers in Kenya who receive unsolicited PIN prompts on basic phones",
+        "pitch": "Real-time fraud prevention for M-Pesa users on cheap phones without internet",
+        "ai_core": "On-device lightweight decision engine that runs locally on the phone, using recent USSD transaction history stored in a local SQLite database and simple rule-based checks against known fraud patterns, with SMS-based alerts via Twilio for fraud notifications",
+    }
+    assert idea_similarity(ping_guard, pesa_shield) >= SIMILARITY_THRESHOLD
+    assert dedup_ideas([ping_guard, pesa_shield]) == [ping_guard]
+
+
+def test_duplicate_names_are_always_collapsed():
+    assert len(dedup_ideas([{"name": "FloatGuard", "pitch": "one"},
+                            {"name": " floatguard ", "pitch": "different"}])) == 1
+
+
 def test_tournament_wins_ignores_invalid():
     matches = [
         {"a": "c01", "b": "c02", "winner": "c01"},
@@ -76,3 +112,32 @@ def test_tournament_wins_ignores_invalid():
     ]
     wins = tournament_wins(matches, ["c01", "c02", "c03"])
     assert wins == {"c01": 1, "c02": 0, "c03": 1}
+
+
+def test_stability_scores_correct_entire_zero_to_one_response():
+    dimensions = list(DEFAULT_WEIGHTS)
+    data = {"scores": [{"id": identity, **{d: value for d in dimensions}}
+                       for identity, value in (("c01", .898), ("c02", .783))]}
+    totals, corrected = _scaled_scores(data, {"c01", "c02"}, DEFAULT_WEIGHTS)
+    assert corrected is True
+    assert totals == {"c01": 8.98, "c02": 7.83}
+
+
+def test_stability_rejects_missing_candidate_and_unique_finalists_skip_duplicates():
+    with pytest.raises(ValueError, match="omitted"):
+        _scaled_scores({"scores": [{"id": "c01", **{d: 8 for d in DEFAULT_WEIGHTS}}]},
+                       {"c01", "c02"}, DEFAULT_WEIGHTS)
+    candidates = [{"id": "c01", "name": "FloatGuard", "pitch": "voice float alerts"},
+                  {"id": "c02", "name": "FloatGuard", "pitch": "same name different pitch"},
+                  {"id": "c03", "name": "ClinicLens", "pitch": "medicine expiry from shelf photos"}]
+    rows = [{"id": x, "weighted_total": 9-i} for i, x in enumerate(("c01", "c02", "c03"))]
+    assert [x["id"] for x in _distinct_finalists(rows, candidates, 2)] == ["c01", "c03"]
+
+
+def test_invalid_redteam_response_keeps_all_risk_categories_reviewable():
+    review = _fallback_review("c03")
+    assert review["id"] == "c03"
+    assert {risk["category"] for risk in review["risks"]} == {
+        "technical", "api_rate_limit", "data", "demo_failure", "already_exists"
+    }
+    assert all(risk["severity"] == "medium" for risk in review["risks"])

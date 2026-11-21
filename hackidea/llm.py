@@ -109,6 +109,7 @@ class OpenAICompatLLM(BaseLLM):
     def __init__(self, cfg):
         self.cfg = cfg
         self.session = requests.Session()
+        self.request_count = 0
 
     def chat(self, messages: list[dict], max_tokens: int | None = None,
              temperature: float = 0.7, seed: int | None = None) -> str:
@@ -118,6 +119,12 @@ class OpenAICompatLLM(BaseLLM):
             "max_tokens": max_tokens or self.cfg.llm_max_tokens,
             "temperature": temperature,
         }
+        # NVIDIA's Nemotron Nano Omni reasoning endpoint puts its internal
+        # reasoning in `reasoning_content` and can leave `content` empty unless
+        # thinking is disabled. HackIdea consumes the final answer only.
+        if (self.cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
+                and self.cfg.llm_model.startswith("nvidia/nemotron-3-nano-omni")):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         if seed is not None:
             payload["seed"] = seed
         url = f"{self.cfg.llm_base_url}/chat/completions"
@@ -126,6 +133,7 @@ class OpenAICompatLLM(BaseLLM):
         last_err: Exception | None = None
         for attempt in range(self.cfg.llm_max_retries + 1):
             try:
+                self.request_count += 1
                 resp = self.session.post(url, json=payload, headers=headers,
                                          timeout=self.cfg.llm_timeout)
                 if resp.status_code in (429, 500, 502, 503, 504):

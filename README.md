@@ -26,7 +26,7 @@ Requires Python 3.11+.
 | `LLM_API_KEY` | API key (any string for local proxies) | — |
 | `LLM_MODEL` | exact model id | `gpt-4o-mini` |
 | `LLM_TIMEOUT` / `LLM_MAX_RETRIES` / `LLM_MAX_TOKENS` | HTTP behavior | 300 / 3 / 8000 |
-| `SEARCH_PROVIDER` | `ddgs` (free, no key), `tavily`, `brave` | `ddgs` |
+| `SEARCH_PROVIDER` | `ddgs` (free, no key), `tavily`, `brave`, a comma-separated list, or `all` (every provider with a key, plus ddgs). Several providers are queried in parallel and their results fused, with URLs that more than one engine returns ranked first | `ddgs` |
 | `DDGS_BACKENDS` | backends tried in order until one works | `google,duckduckgo,bing,mojeek` |
 | `TAVILY_API_KEY` / `BRAVE_API_KEY` | for keyed search providers | — |
 | `DEPTH` | `quick` / `standard` / `deep` | `standard` |
