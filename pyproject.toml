@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hackidea"
+version = "0.1.0"
+description = "HackIdea: research-driven hackathon idea finder + full build blueprint generator"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "ddgs>=9.0",
+    "beautifulsoup4>=4.12",
+    "jsonschema>=4.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+hackidea = "hackidea.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hackidea*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

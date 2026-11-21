@@ -1,0 +1,9 @@
+.venv/
+.env
+.cache/
+runs/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+live_run_log.txt
+live_run_stdout.md
