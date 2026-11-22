@@ -19,6 +19,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 hackidea = "hackidea.cli:main"
+hackidea-telegram = "hackidea.telegram:main"
 
 [tool.setuptools.packages.find]
 include = ["hackidea*"]

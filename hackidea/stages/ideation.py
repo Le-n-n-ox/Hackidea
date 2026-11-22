@@ -63,12 +63,23 @@ def run(runner) -> dict:
     angles = prompts.ANGLE_LIST
     counts = [n // len(angles) + (1 if i < n % len(angles) else 0)
               for i in range(len(angles))]
-    candidates: list[dict] = []
+    progress_path = runner.run_dir / "ideation_progress.json"
+    if progress_path.exists():
+        progress = runner.load("ideation_progress.json")
+        candidates = progress.get("candidates", [])
+        completed_slots = set(progress.get("completed_slots", []))
+        runner.log(f"ideation: resuming with {len(candidates)} candidates; "
+                   f"{len(completed_slots)} slots complete")
+    else:
+        candidates = []
+        completed_slots: set[int] = set()
     rejected: list[dict] = []
     slot = 0
     for angle, count in zip(angles, counts):
         for _ in range(count):
             slot += 1
+            if slot in completed_slots:
+                continue
             accepted = False
             for attempt in range(1, 4):
                 # A duplicate retry changes both the source seed and sampling seed,
@@ -112,6 +123,13 @@ def run(runner) -> dict:
                 break
             if not accepted:
                 runner.log(f"  no distinct candidate found for angle {angle!r}")
+            completed_slots.add(slot)
+            runner.save("ideation_progress.json", {
+                "candidates": candidates,
+                "completed_slots": sorted(completed_slots),
+            })
+            runner.log(f"ideation progress: {len(candidates)}/{n} candidates; "
+                       f"slot {slot}/{n} complete")
 
     runner.save("candidates.json", {"candidates": candidates})
     runner.log(f"ideation: {len(candidates)} distinct candidates across angles "

@@ -88,7 +88,25 @@ class BaseLLM:
         ]
         last_err: Exception | None = None
         for _ in range(tries):
-            raw = self.chat(messages, max_tokens=max_tokens, temperature=temperature, seed=seed)
+            chat_options = {}
+            if getattr(self, "supports_json_schema", False):
+                # NVIDIA's supported endpoints accept OpenAI-compatible JSON
+                # Schema output. Keep strict=False because pipeline schemas
+                # intentionally include optional fields and open-ended maps.
+                name = re.sub(r"[^a-zA-Z0-9_-]", "_", stage) or "hackidea_response"
+                chat_options["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": name[:64], "strict": False, "schema": schema},
+                }
+                if getattr(self, "needs_reasoning_headroom", False):
+                    # Reasoning tokens count against max_tokens on this endpoint.
+                    # Small stage caps can truncate otherwise valid JSON before
+                    # the answer body is complete.
+                    max_tokens = max(max_tokens or 0, 4000)
+            elif getattr(self, "supports_json_mode", False):
+                chat_options["response_format"] = {"type": "json_object"}
+            raw = self.chat(messages, max_tokens=max_tokens, temperature=temperature,
+                            seed=seed, **chat_options)
             try:
                 data = extract_json(raw)
                 schemas.validate(data, schema)
@@ -110,20 +128,40 @@ class OpenAICompatLLM(BaseLLM):
         self.cfg = cfg
         self.session = requests.Session()
         self.request_count = 0
+        nvidia_endpoint = cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
+        self.uses_mistral_large_4 = (
+            nvidia_endpoint and cfg.llm_model == "mistralai/mistral-large-4-1t-a52b"
+        )
+        self.uses_nemotron_bolt = (
+            nvidia_endpoint and cfg.llm_model == "nvidia/nemotron-3.5-bolt-e4b"
+        )
+        self.supports_json_schema = (
+            self.uses_mistral_large_4 or self.uses_nemotron_bolt
+        )
+        self.supports_json_mode = self.supports_json_schema
+        self.needs_reasoning_headroom = self.uses_mistral_large_4
 
     def chat(self, messages: list[dict], max_tokens: int | None = None,
-             temperature: float = 0.7, seed: int | None = None) -> str:
+             temperature: float = 0.7, seed: int | None = None,
+             response_format: dict | None = None) -> str:
         payload: dict[str, Any] = {
             "model": self.cfg.llm_model,
             "messages": messages,
             "max_tokens": max_tokens or self.cfg.llm_max_tokens,
             "temperature": temperature,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if self.uses_mistral_large_4:
+            # NVIDIA's Mistral Large 4 endpoint otherwise includes reasoning
+            # tokens in the answer body; keep JSON pipeline calls concise.
+            payload["reasoning_effort"] = "low"
         # NVIDIA's Nemotron Nano Omni reasoning endpoint puts its internal
         # reasoning in `reasoning_content` and can leave `content` empty unless
         # thinking is disabled. HackIdea consumes the final answer only.
-        if (self.cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
-                and self.cfg.llm_model.startswith("nvidia/nemotron-3-nano-omni")):
+        if (self.uses_nemotron_bolt
+                or (self.cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
+                    and self.cfg.llm_model.startswith("nvidia/nemotron-3-nano-omni"))):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         if seed is not None:
             payload["seed"] = seed
@@ -174,7 +212,8 @@ class MockLLM(BaseLLM):
             val = val(text)
         return val if isinstance(val, str) else json.dumps(val)
 
-    def chat(self, messages, max_tokens=None, temperature=0.7, seed=None):
+    def chat(self, messages, max_tokens=None, temperature=0.7, seed=None,
+             response_format=None):
         return self._pick(messages)
 
 

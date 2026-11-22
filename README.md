@@ -43,6 +43,10 @@ LLM_MODEL=qwen/qwen4-max:free
 
 Any other OpenAI-compatible server works the same way (OpenRouter, Ollama, vLLM, ...).
 
+**NVIDIA API option:** set `LLM_PROVIDER=openai_compat`, `LLM_BASE_URL=https://integrate.api.nvidia.com/v1`,
+`LLM_API_KEY` to your NVIDIA API key, and `LLM_MODEL=nvidia/nemotron-3.5-bolt-e4b`. HackIdea
+uses this model's JSON Schema output and disables its reasoning mode for faster structured runs.
+
 ## Usage
 
 ```bash
@@ -64,6 +68,19 @@ hackidea run --resume runs/20260101_120000 --stage blueprint
 
 The final report is printed to the terminal **and** saved to `runs/<timestamp>/final_report.md`.
 Progress logs go to stderr.
+
+## Telegram chat interface
+
+The Telegram interface runs the same pipeline when you send it a text message. It uses long polling, so it does not need a public webhook URL.
+
+1. In Telegram, message `@BotFather`, create a bot with `/newbot`, and copy its token into `.env` as `TELEGRAM_BOT_TOKEN`.
+2. Start the bot locally with `python -m hackidea.telegram`.
+3. Open your bot and send `/start`, then `/id`. Copy the numeric user ID into `.env` as `TELEGRAM_ALLOWED_USER_IDS` and restart the process.
+4. Send a detailed hackathon brief. Set `DEPTH=quick` in `.env` for a faster first run; use `standard` or `deep` for fuller research.
+
+Pipeline runs are disabled until at least one allowed user ID is configured. Each text message from an allowed user starts a new run. The report and artifacts are saved under `runs/`; the bot sends `final_report.md` as a downloadable Telegram attachment (with a text fallback if upload fails). Keep `.env` private and do not share the bot token.
+
+For an always-on hosted bot, deploy this as a Python background worker and start it with `python -m hackidea.telegram`. Add the same `.env` values as the host's secret/environment variables. The worker needs outbound HTTPS access to Telegram, the configured LLM, and search providers. The local run-artifact folder is not a durable backup on most hosts, so download important run artifacts or add persistent storage before relying on them.
 
 ## Pipeline (each stage = one inspectable JSON artifact)
 
