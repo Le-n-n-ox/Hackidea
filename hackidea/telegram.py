@@ -42,6 +42,24 @@ def safe_failure_hint(exc: BaseException) -> str:
     return f"LLM request failed ({type(exc).__name__}). Check the provider, model ID, API base URL, and available quota."
 
 
+def safe_telegram_failure_hint(exc: BaseException) -> str:
+    """Return useful Telegram upload diagnostics without exposing the token-bearing URL."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            description = response.json().get("description")
+        except (ValueError, AttributeError):
+            description = None
+        if description:
+            return f"HTTP {response.status_code}: {description}"
+        return f"HTTP {response.status_code}"
+    if isinstance(exc, requests.Timeout):
+        return "Telegram request timed out"
+    if isinstance(exc, requests.ConnectionError):
+        return "could not connect to Telegram"
+    return type(exc).__name__
+
+
 class TelegramBot:
     def __init__(self, token: str, allowed_user_ids: set[int]):
         self.token = token
@@ -185,9 +203,10 @@ class TelegramBot:
                 self.send_document(chat_id, report_path, "Your HackIdea report is ready.")
             except (Exception, SystemExit) as exc:
                 # The pipeline succeeded; keep that distinct from a Telegram upload failure.
-                print(f"[hackidea-telegram] report delivery failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+                reason = safe_telegram_failure_hint(exc)
+                print(f"[hackidea-telegram] report delivery failed ({reason})", file=sys.stderr, flush=True)
                 try:
-                    self.send(chat_id, "The run completed, but I couldn't attach the report. Here it is as text instead:")
+                    self.send(chat_id, f"The run completed, but I couldn't attach the report ({reason}). Here it is as text instead:")
                     self.send(chat_id, report_path.read_text(encoding="utf-8"))
                 except (Exception, SystemExit) as send_exc:
                     print(f"[hackidea-telegram] text fallback failed ({type(send_exc).__name__})", file=sys.stderr, flush=True)
