@@ -337,122 +337,62 @@ key_assumption, why_beats_others[{{point, evidence_url?}}], rationale."""
 
 # ---------------- Stage 7: blueprint ----------------
 
-BP_SYSTEM = ("You are a senior engineer writing an implementable hackathon prototype blueprint. Be concrete "
-             "about app-owned code and demo steps, but never invent external model names, endpoints, prices, "
-             "quotas, legal permissions, or product capabilities. If evidence does not establish a detail, "
-             "label it 'verify before use' and give a local or simulated fallback. For payment, banking, "
-             "identity, or account workflows, use synthetic fixtures and simulated events only: do not collect "
-             "PINs, passwords, OTPs, or private account data, and do not approve, block, or initiate real "
-             "transactions. "
-             "Output GitHub markdown only (no fences around the whole answer).")
+# Structured, single-job blueprint prompts. The Python renderer controls layout,
+# references, examples, the calendar, owner names, and all external-fact wording.
+_BLUEPRINT_GUIDANCE = {
+    "summary": "Write the decision page: one concise pitch, intended user, exactly three demo steps, two or three plain reasons, one biggest risk and response, confidence advice, and the first action. Keep every string brief for a phone screen.",
+    "frontend": "Plan the smallest useful phone-sized web screen for this exact idea. Return a short UI flow, 2-5 named screens/components, and 3-5 concrete visual polish actions.",
+    "backend": "Describe the app-owned API routes, files, request flow, and error behavior for a 12-hour prototype. Keep payloads implementable. Python inserts researched third-party integration facts separately.",
+    "ai": "Describe one narrow AI task and give the actual compact prompt. Python owns availability and confirmation decisions. Give JSON fields, three evaluation cases, and a manual fallback. Do not state vendor pricing, quotas, or rate limits.",
+    "data": "Design a tiny synthetic fixture schema for this product: field names, source, three sample rows, and validation rules. Avoid real guest records and unsupported claims.",
+    "timeline": "Give exactly six short milestone names in dependency order for this event plus one cut-line. Do not include owners, hours, or a table; Python assigns contiguous time ranges and stable owner names.",
+    "demo": "Write a three-minute demo in three to five beats, a five-part pitch outline, and three to five judge questions with concise answers. Avoid unsupported market or competitor claims.",
+    "risks": "Give three to five concrete project risks and an action that reduces each. Keep them distinct. Do not repeat the summary risk or add generic disclaimers.",
+    "appendix": "Explain in two plain sentences why this finalist was selected. Do not mention scores, rankings, weights, pair wins, penalties, stability, tournaments, rubrics, or internal pipeline mechanics.",
+}
 
 
-def blueprint_config(ctx: dict, winner: dict, digest: str) -> tuple[str, str]:
-    system = "Choose one coherent, minimal stack for the winning idea. Do not invent API capabilities or prices."
-    user = f"""Choose the project's shared stack and list only concrete facts directly supported by the evidence.
-Context: {ctx_block(ctx)}
-Winner: {candidate_block(winner)}
-Fetched research:
-{digest}
+def blueprint_section(ctx: dict, winner: dict, section: str, build_config: dict,
+                      docs: list[dict], runner_up: dict | None = None) -> tuple[str, str]:
+    if section not in _BLUEPRINT_GUIDANCE:
+        raise ValueError(f"unknown blueprint section {section!r}")
+    relevant_ids = {
+        "backend": {"at_sandbox", "at_python_sdk", "fastapi_quickstart"},
+        "ai": {"gemini_pricing", "gemini_python"},
+        "data": set(),
+    }.get(section, set())
+    excerpts = "\n\n".join(
+        f"[{source['id']}] {source['title']} — {source['url']}\n{source.get('text','')[:1400]}"
+        for source in docs if source["id"] in relevant_ids
+    ) or "No vendor facts are needed for this section."
+    choices = {key: build_config[key] for key in
+               ("frontend", "backend", "database", "primary_ai", "sms", "hosting")}
+    system = ("You are an experienced hackathon product engineer. Return one JSON object matching the supplied schema. "
+              "Write concise, executable advice. You may recommend app-owned choices without citations. Never invent factual "
+              "claims about vendor prices, quotas, rate limits, features, laws, or competitors. Python inserts factual claims "
+              "only from fetched documentation. Do not write Markdown, tables, generic caveats, or repeated pitch text.")
+    blueprint_winner = dict(winner)
+    blueprint_winner["demo_scope"] = (
+        "Use the Africa's Talking official SMS sandbox and simulator for the demo. Do not mock SMS or USSD. "
+        "Use synthetic tour fixtures; never use production recipients or real transactions."
+        if "africa's talking" in str(build_config.get("sms", "")).casefold()
+        else "Use an event sponsor's official sandbox when available; stub only production accounts the team cannot access in time."
+    )
+    user = f"""SECTION JOB: {_BLUEPRINT_GUIDANCE[section]}
 
-Use primary_ai and fallback_ai as provider + model names only when supplied evidence supports the choice;
-otherwise mark the choice as a decision to verify and give a mock/local fallback. List only integrations the
-prototype can actually use and that are supported by the evidence. Do not imply access to a carrier, bank,
-wallet, device notification stream, or transaction approval API unless the supplied evidence proves it.
-For each external factual claim, set evidence_url to an exact URL in the supplied fetched research; if no
-source supports a fact, omit it. Keep services minimal and compatible with the stated team/time/budget.
-Return JSON with frontend, backend, database, primary_ai, fallback_ai, hosting, auth, integrations[],
-claims[{{claim,evidence_url}}]."""
-    return system, user
-
-
-def _bp_base(ctx: dict, winner: dict, detail: str, digest: str, build_config: dict) -> str:
-    return f"""HACKATHON CONTEXT:
+HACKATHON:
 {ctx_block(ctx)}
 
-WINNING IDEA (build exactly this):
-{candidate_block(winner)}
+WINNING IDEA:
+{candidate_block(blueprint_winner)}
 
-JUDGING/SCORE/RED-TEAM DETAIL:
-{detail}
+FIXED STACK (use consistently; do not introduce another vendor):
+{json.dumps(choices, ensure_ascii=False)}
 
-SHARED BUILD DECISIONS (use these choices consistently in every section; do not introduce alternatives):
-{json.dumps(build_config, ensure_ascii=False, indent=2)}
+RUNNER-UP: {(runner_up or {}).get('name', '(not recorded)')}
 
-PROTOTYPE SAFETY BOUNDARY:
-Use synthetic data and simulated incoming events for any financial, banking, mobile-money, identity, or
-account workflow. The prototype must not capture secrets or interact with real accounts or transactions.
-Describe external capabilities, prices, quotas, permissions, and product comparisons as unverified unless a
-specific supplied page directly establishes that exact claim. Do not treat a fetched URL alone as proof.
+RELEVANT OFFICIAL DOCUMENTATION:
+{excerpts}
 
-FETCHED RESEARCH EVIDENCE:
-{digest}
-"""
-
-
-def blueprint_a(ctx, winner, detail, digest, build_config) -> tuple[str, str]:
-    user = _bp_base(ctx, winner, detail, digest, build_config) + """
-Write these sections (markdown headers exactly):
-## 1. Idea
-Name, one-sentence pitch, the problem (2-3 sentences, concrete), target user, the 'why now', and the AI
-core (what the AI actually does, mechanically). Expand the winning idea — do not change it.
-## 3. Tech stack
-Every choice with a one-line reason: frontend, backend, database, AI models, hosting, auth if needed. Use
-the shared build decisions. Mark model/provider details and costs for verification when they are not supported
-by supplied evidence. Add a cost table that states 'unknown; verify current pricing' instead of inventing
-free-tier limits or $0 costs.
-## 4. Architecture
-A Mermaid flowchart of the system (```mermaid block) + a short data-flow explanation (numbered steps).
-## 8. Data plan
-Where each dataset comes from, how to get it legally (license/API terms), volume needed, and a concrete
-fallback with synthetic/sample data (describe how to generate it)."""
-    return BP_SYSTEM, user
-
-
-def blueprint_b(ctx, winner, detail, digest, build_config) -> tuple[str, str]:
-    user = _bp_base(ctx, winner, detail, digest, build_config) + """
-Write these sections (markdown headers exactly):
-## 5. Frontend guide
-Pages/components list, state management choice, UI flow, key libraries, design direction, and 5 concrete
-tricks to make the demo look polished fast (specific to this app). Mobile-first if the audience needs it.
-## 6. Backend guide
-Project structure tree, API endpoints table (method, path, request shape, response shape — real JSON
-examples), data models/schema (actual fields+types), background jobs if any, error handling strategy. Use
-local prototype endpoints and synthetic fixtures; do not describe unverified external APIs.
-## 7. AI integration guide
-Model selection rationale (primary+fallback, clearly marking any unverified choice), ACTUAL prompt templates (full text in code
-blocks), RAG/agent design if relevant (chunking, retrieval, tool definitions as JSON), evaluation approach
-(golden set + metrics), latency/cost handling (streaming, caching, batching), guardrails, and a demo-safe
-fallback path if the API fails live (cached responses / local model)."""
-    return BP_SYSTEM, user
-
-
-def blueprint_c(ctx, winner, detail, digest, build_config) -> tuple[str, str]:
-    hours = ctx.get("duration_hours") or 48
-    team = ctx.get("team") or []
-    user = _bp_base(ctx, winner, detail, digest, build_config) + f"""
-Write these sections (markdown headers exactly):
-## 9. Hour-by-hour timeline
-Scaled to {hours} hours. Table: hour range | milestone | owner | done-when. Include sleep/buffer realism for
-{hours}h, integration checkpoints, and a clearly marked CUT LINE: what to drop if behind at the 60% mark.
-## 10. Task split
-Per team member ({json.dumps(team)}): concrete workstreams matching their skills, parallelizable, with
-hand-off points and who owns the demo.
-## 11. Setup commands
-Repo structure tree, exact install/run commands (copy-pasteable), and a complete .env.example in a code
-block (placeholder values only)."""
-    return BP_SYSTEM, user
-
-
-def blueprint_d(ctx, winner, detail, digest, build_config) -> tuple[str, str]:
-    user = _bp_base(ctx, winner, detail, digest, build_config) + """
-Write these sections (markdown headers exactly):
-## 12. Demo and pitch
-A 3-minute demo script (minute-by-minute, what is shown/said, the 'wow' moment), a pitch outline
-(problem->insight->demo->impact->ask), 6 likely judge questions with strong specific answers, and exactly
-what to emphasize for each sponsor prize/credit mentioned in the context.
-## 13. Risks and mitigations
-Top risks (technical, demo-day, judging) each with a concrete mitigation and an owner.
-### Stretch goals
-3 stretch goals ordered by value/effort, only if time allows."""
-    return BP_SYSTEM, user
+Return JSON for section `{section}`. Use short, concrete values. Python validates fields and renders the document."""
+    return system, user

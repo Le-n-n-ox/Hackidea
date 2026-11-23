@@ -68,8 +68,9 @@ hackidea run --resume runs/20260101_120000 --stage scoring
 hackidea run --resume runs/20260101_120000 --stage blueprint
 ```
 
-The final report is printed to the terminal **and** saved to `runs/<timestamp>/final_report.md`.
-Progress logs go to stderr.
+The blueprint stage fetches a short set of official integration docs after choosing the winner, then makes nine small structured content calls. Python validates and renders the result as `final_report.md`, a responsive self-contained `final_report.html`, and `final_report.pdf`. The PDF includes the architecture diagram and is the file sent by Telegram; `/last` sends the latest PDF. The Markdown and JSON remain available for inspection. A 12-hour event gets a compact plan, while longer events receive a longer continuous timeline.
+
+The build blueprint uses FastAPI, SQLite, Google Gemini structured output, and the sponsor's Africa's Talking SMS sandbox for the hospitality example. Use synthetic records and the simulator test recipient. The report includes a generated starter app, prompt, sample schema, fixtures, and Windows/Linux setup commands. Progress logs go to stderr.
 
 ## Telegram chat interface
 
@@ -95,7 +96,7 @@ For an always-on hosted bot, deploy this as a Python background worker and start
 | 4 scoring | `weights.json`, `scoring_table.json/.md` | 0–10 on 6 dimensions, reweighted to judging criteria; totals computed in Python |
 | 5 adversarial | `redteam.json`, `tournament.json`, `stability.json` | red-team top 5, round-robin pairwise tournament, top-2 re-scored with reworded prompt + different seed; flips investigated |
 | 6 decision | `decision.json` | ONE winner, honest confidence + the assumption that would change the pick |
-| 7 blueprint | `blueprint_a..d.md`, `final_report.md` | full 14-section build plan |
+| 7 blueprint | `blueprint_content.json`, `blueprint_research.json`, `blueprint_a..d.md`, `final_report.md`, `final_report.html`, `final_report.pdf` | official docs research, validated content, and rendered build plan |
 
 Guarantees:
 - **No fabricated citations** — only pages actually fetched appear in Sources; invalid evidence URLs are stripped.
@@ -110,7 +111,7 @@ pytest -q
 ```
 
 Unit tests cover scoring math, weight normalization, JSON extraction/retry, URL normalization,
-dedup, tournament counting; one end-to-end test runs the whole pipeline with a mocked LLM/search/fetch.
+dedup, tournament counting, timeline/owner invariants, report rendering, and fake-API PDF delivery. The end-to-end test uses a mocked LLM/search/fetch.
 
 ## Notes & limits
 

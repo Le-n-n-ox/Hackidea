@@ -7,6 +7,7 @@ import time
 import pytest
 
 from hackidea.config import Config
+from hackidea.blueprint_document import code_files, section_defaults, team_aliases, event_date_from_context
 from hackidea.llm import MockLLM
 from hackidea.prompts import ANGLE_LIST
 from hackidea.runner import Runner
@@ -107,15 +108,17 @@ def _search_hits(query):
             {"url": f"https://example.com/s{i * 2 + 1}", "title": f"Source {i}b", "snippet": "mock snippet"}]
 
 
-BP = {
-    "blueprint_config": {"frontend": "React", "backend": "FastAPI", "database": "SQLite",
-        "primary_ai": "OpenAI gpt-4o-mini", "fallback_ai": "local Whisper tiny",
-        "hosting": "Render", "auth": "none for demo", "integrations": ["OpenAI API"], "claims": []},
-    "blueprint_a": "## 1. Idea\nMilkLedger helps cooperative treasurers reconcile payments with AI.\n\n## 3. Tech stack\nReact, FastAPI, SQLite, OpenAI gpt-4o-mini; fallback local Whisper tiny.\n\n## 4. Architecture\n```mermaid\nflowchart LR\nA-->B\n```\n\n## 8. Data plan\nUse synthetic records and consented samples.\n",
-    "blueprint_b": "## 5. Frontend guide\nUpload, Ledger, Demo.\n\n## 6. Backend guide\nPOST /api/ledger.\n\n## 7. AI integration guide\nPrompt: extract payment rows as JSON; primary OpenAI gpt-4o-mini; fallback local Whisper tiny.\n",
-    "blueprint_c": "## 9. Hour-by-hour timeline\n0-48 hours. CUT LINE: drop analytics.\n\n## 10. Task split\nFrontend, backend, ML.\n\n## 11. Setup commands\nRun the app.\n",
-    "blueprint_d": "## 12. Demo and pitch\nShow a reconciliation.\n\n## 13. Risks and mitigations\nWiFi fallback.\n### Stretch goals\nAdd languages.\n",
-}
+_BP_WINNER = {"name": "MilkLedger", "pitch": "An AI workflow for cooperative treasurers that reconciles payment records.",
+              "problem": "Cooperative treasurers struggle to reconcile member payments.",
+              "target_user": "cooperative treasurers", "ai_core": "structured extraction", "why_now": "test",
+              "angle": "agentic", "data_needed": "synthetic ledger rows", "sponsor_fit": "SMS"}
+_BP_CTX = {"duration_hours": 48, "team": [{"role": "frontend", "skills": ["react"]},
+            {"role": "backend", "skills": ["python"]}, {"role": "ML", "skills": ["prompting"]}],
+           "sponsors": ["OpenAI", "Twilio"]}
+BP = {f"blueprint_{section}":
+      (lambda _text, section=section: section_defaults(
+          section, _BP_CTX, _BP_WINNER, team_aliases(_BP_CTX), "2026-11-26"))
+      for section in ("summary", "frontend", "backend", "ai", "data", "timeline", "demo", "risks", "appendix")}
 
 
 @pytest.fixture()
@@ -184,7 +187,7 @@ def test_end_to_end(tmp_path, scripts):
                 active_fetches -= 1
 
     runner = Runner(cfg, llm=llm, search=search, fetch=fetch)
-    run_dir = runner.run(context_text="Theme: AI for financial inclusion in Africa. 48 hours, team of 3.")
+    run_dir = runner.run(context_text="Theme: AI for hospitality and rural tourism. 48 hours, team of 3. Sponsor: Africa's Talking.")
     assert peak_fetches > 1
 
     for name in ("context.json", "research_plan.json", "search_results.json", "research_log.json",
@@ -219,20 +222,56 @@ def test_end_to_end(tmp_path, scripts):
 
     report = (run_dir / "final_report.md").read_text(encoding="utf-8")
     assert report.startswith("# ")
+    assert report.count("## Decide in five minutes") == 1
     assert report.count("## 1. Idea") == 1
     assert "MilkLedger" in report
     assert "another candidate" not in report
-    assert "## 14. Sources" in report
-    assert "Prototype safety boundary" in report
-    assert "Prototype and verification boundary" in report
-    assert "does not access real accounts" in report
-    assert report.count("| Scoring dimension | Winner score |") == 1
-    assert "| rank | id | name |" not in report
+    assert "## Sources" in report
+    assert "Check before you rely on this plan" in report
+    assert "selection score" not in report.lower()
+    assert "pair wins" not in report.lower()
+    assert "\\rightarrow" not in report
+    assert "```mermaid" not in report
+    assert "gemini-3.5-flash-lite" in report
+    assert "AT_API_KEY" in report
+    assert report.count("### Check before you rely on this plan") == 1
+    assert "Africa's Talking SMS sandbox" in report
+    assert "gemini-3.5-flash-lite" in report
+    appendix = report.partition("## Appendix:")[2].lower()
+    main_report = report.partition("## Appendix:")[0].lower()
+    assert "selection score" not in main_report
+    assert "pair wins" not in main_report
+    assert "selection score" not in appendix
+    blueprint_sources = json.loads((run_dir / "blueprint_research.json").read_text(encoding="utf-8"))["sources"]
+    cited_report = report.partition("## Sources")[0]
+    assert all(source["url"] in cited_report for source in blueprint_sources)
+    content = json.loads((run_dir / "blueprint_content.json").read_text(encoding="utf-8"))
+    aliases = set(content["team_aliases"])
+    assert all(row["owner"] in aliases for row in content["timeline"]["calendar"])
+    assert {row["owner"] for row in content["team_workstreams"]} == aliases
+    fixtures = content["data"]["fixtures"]
+    assert len({row["tour_id"] for row in fixtures}) == len(fixtures)
+    compile(code_files(content)["main.py"], "generated main.py", "exec")
+    assert (run_dir / "final_report.pdf").exists()
+    pdf = (run_dir / "final_report.pdf").read_bytes()
+    assert pdf.startswith(b"%PDF")
+    assert len(re.findall(rb"/Type\s*/Page\b", pdf)) >= 3
+    assert (run_dir / "final_report.html").exists()
+    html_report = (run_dir / "final_report.html").read_text(encoding="utf-8")
+    assert html_report.count("Automate rural tour bookings via SMS/USSD") <= 1
+    assert (run_dir / "architecture.svg").exists()
+    assert (run_dir / "blueprint_content.json").exists()
+    assert (run_dir / "blueprint_research.json").exists()
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
     assert len(state["stage_runs"]) == 8
     assert all(row["status"] == "completed" for row in state["stage_runs"])
     assert all(row["seconds"] >= 0 and row["llm_requests"] >= 0 for row in state["stage_runs"])
     assert all(row["llm_call_seconds"] >= 0 and row["llm_rate_limits"] >= 0
                and row["search_deadline_cutoffs"] >= 0 for row in state["stage_runs"])
-    for n in range(1, 15):
-        assert f"## {n}." in report, f"missing section {n}"
+    assert "### 1. Idea and user" in report
+    assert "### 2. Stack recommendations" in report
+    assert "### 10. Risks" in report
+    content = json.loads((run_dir / "blueprint_content.json").read_text(encoding="utf-8"))
+    assert content["timeline"]["calendar"][0]["start"] == 0
+    assert content["timeline"]["calendar"][-1]["end"] == 48
+    assert len({row["owner"] for row in content["timeline"]["calendar"]}) <= 3

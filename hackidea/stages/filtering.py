@@ -49,7 +49,8 @@ def run(runner) -> dict:
         candidate["demo_scope"] = (
             f"In {duration:g} hours, implement one end-to-end {candidate.get('problem','user problem')} workflow "
             "with a single screen/action, one AI result grounded in the selected fetched evidence, and 5-10 "
-            "hand-authored or synthetic fixtures. Mock external APIs; no live account or production integration.")
+            "hand-authored or synthetic fixtures. Use an event sponsor's official sandbox when it is available; "
+            "stub only production systems or accounts the team cannot access in time.")
         stage = f"filter_{candidate['id']}"
         try:
             row = _decision(runner, candidate, digest, stage)
