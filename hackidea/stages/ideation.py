@@ -53,12 +53,14 @@ def dedup_ideas(candidates: list[dict], threshold: float = SIMILARITY_THRESHOLD)
 def run(runner) -> dict:
     ctx, n = runner.ctx, runner.preset["candidates"]
     sources = runner.load("research_log.json")["sources"]
-    evidence = [s for s in sources if s.get("fetched") and s.get("source_type") in
+    evidence = [s for s in sources if s.get("relevant") and s.get("fetched") and s.get("source_type") in
                 ("user_problems", "market_products", "local_context", "news_launches")]
     if not evidence:
-        evidence = [s for s in sources if s.get("fetched")]
-    if not evidence:
-        raise RuntimeError("ideation needs at least one fetched evidence page")
+        raise RuntimeError("ideation needs at least one fetched, theme-relevant user-problem or market page")
+    problem_rows = runner.load("problems.json").get("problems", []) if (runner.run_dir / "problems.json").exists() else []
+    source_by_url = {s["url"]: s for s in sources}
+    problem_seeds = [(p, source_by_url[p["evidence_url"]]) for p in problem_rows
+                     if p.get("evidence_url") in source_by_url and source_by_url[p["evidence_url"]].get("relevant")]
 
     angles = prompts.ANGLE_LIST
     counts = [n // len(angles) + (1 if i < n % len(angles) else 0)
@@ -84,9 +86,15 @@ def run(runner) -> dict:
             for attempt in range(1, 4):
                 # A duplicate retry changes both the source seed and sampling seed,
                 # so the model has a concrete path out of its previous answer.
-                seed = evidence[(slot + attempt - 2) % len(evidence)]
+                if problem_seeds:
+                    problem, seed = problem_seeds[(slot + attempt - 2) % len(problem_seeds)]
+                else:
+                    problem, seed = None, evidence[(slot + attempt - 2) % len(evidence)]
                 system, user = prompts.ideation_one(ctx, angle, seed,
                                                      candidates[-8:] + rejected[-6:])
+                if problem:
+                    user += (f"\n\nDistinct problem seed (avoid reusing the same user/task as another idea): "
+                             f"{problem['who']} needs to {problem['task']}. Source: {problem['evidence_url']}")
                 if attempt > 1 and rejected:
                     last = rejected[-1]
                     user += (f"\nYour previous candidate was rejected as a near-duplicate: "

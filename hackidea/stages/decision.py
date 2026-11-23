@@ -41,6 +41,32 @@ def run(runner) -> dict:
     row = score_by_id[winner_id]
     review = redteam.get(winner_id, {})
     metrics = stability["selection_metrics"][winner_id]
+    ordered = [score_by_id[i] for i in stability["final_order"] if i in score_by_id]
+    runner_up = ordered[1] if len(ordered) > 1 else None
+    margin = (metrics["selection_score"] - stability["selection_metrics"][runner_up["id"]]["selection_score"]
+              if runner_up else 0.0)
+    winner_pairs = [p for p in tournament.get("pair_results", [])
+                    if winner_id in (p.get("a"), p.get("b"))]
+    split_votes = sum(p.get("votes", [None, None])[0] != p.get("votes", [None, None])[-1]
+                      for p in winner_pairs)
+    blocking = any(r.get("severity") == "high" and
+                   r.get("category") in ("technical", "data", "demo_failure", "api_rate_limit") and
+                   any(word in r.get("risk", "").lower() for word in
+                       ("cannot", "unavailable", "no access", "not obtainable", "blocking", "will fail"))
+                   for r in review.get("risks", []))
+    high_risks = sum(r.get("severity") == "high" for r in review.get("risks", []))
+    confidence_pct = max(20, min(90, round(55 + max(-15, min(20, margin * 5))
+                                      - split_votes * 8 - high_risks * 4
+                                      - (12 if stability.get("flipped") else 0))))
+    if blocking:
+        confidence_level = "low"
+        confidence_pct = min(confidence_pct, 45)
+    elif confidence_pct >= 72:
+        confidence_level = "high"
+    elif confidence_pct >= 48:
+        confidence_level = "medium"
+    else:
+        confidence_level = "low"
     top_dimensions = sorted(row["scores"].items(), key=lambda item: item[1], reverse=True)[:2]
     evidence_url = normalize_url(winner.get("evidence_url", ""))
     why = [
@@ -59,8 +85,11 @@ def run(runner) -> dict:
     data.update(winner_id=winner_id, why_beats_others=why,
                 rationale="Selection is bound to the recorded tournament and risk-adjusted ranking.",
                 selection_rule=stability["ranking_rule"],
-                confidence_level=data.get("confidence_level", "medium"),
-                confidence_pct=data.get("confidence_pct", 60),
+                confidence_level=confidence_level,
+                confidence_pct=confidence_pct,
+                confidence_inputs={"selection_margin": round(margin, 4), "split_votes": split_votes,
+                                   "stability_flipped": bool(stability.get("flipped")),
+                                   "winner_high_risks": high_risks, "blocking_risk": blocking},
                 key_assumption=data.get("key_assumption", "The required data access is available during the hackathon."))
     runner.save("decision.json", data)
     runner.log(f"DECISION: {winner['name']} (confidence {data['confidence_level']}, "

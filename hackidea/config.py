@@ -18,7 +18,7 @@ SOURCE_TYPES = [
 ]
 
 DEPTH_PRESETS = {
-    "quick":    dict(searches=12, candidates=12, fetch_per_query=1, finalists=3, digest_sources=24),
+    "quick":    dict(searches=12, candidates=12, fetch_per_query=3, finalists=3, digest_sources=24),
     "standard": dict(searches=26, candidates=24, fetch_per_query=2, finalists=5, digest_sources=40),
     "deep":     dict(searches=40, candidates=30, fetch_per_query=3, finalists=5, digest_sources=60),
 }
@@ -65,9 +65,12 @@ class Config:
     llm_timeout: int = 300
     llm_max_retries: int = 3
     llm_max_tokens: int = 8000
+    llm_structured_output: str = "json_schema"
     search_provider: str = "ddgs"
     ddgs_backends: str = "google,duckduckgo,bing,mojeek"
     search_timeout: int = 30
+    search_provider_deadline: int = 12
+    search_workers: int = 4
     tavily_api_key: str = ""
     brave_api_key: str = ""
     fetch_timeout: int = 25
@@ -81,6 +84,9 @@ class Config:
         d = (depth or os.environ.get("DEPTH") or "standard").lower()
         if d not in DEPTH_PRESETS:
             raise ValueError(f"unknown depth {d!r}; choose quick|standard|deep")
+        structured = os.environ.get("LLM_STRUCTURED_OUTPUT", "json_schema").lower()
+        if structured not in ("json_schema", "json_object", "off"):
+            raise ValueError("LLM_STRUCTURED_OUTPUT must be json_schema, json_object, or off")
         return cls(
             llm_provider=os.environ.get("LLM_PROVIDER", "openai").lower(),
             llm_base_url=os.environ.get("LLM_BASE_URL", cls.llm_base_url).rstrip("/"),
@@ -89,9 +95,12 @@ class Config:
             llm_timeout=_int("LLM_TIMEOUT", 300),
             llm_max_retries=_int("LLM_MAX_RETRIES", 3),
             llm_max_tokens=_int("LLM_MAX_TOKENS", 8000),
+            llm_structured_output=structured,
             search_provider=os.environ.get("SEARCH_PROVIDER", "ddgs").lower(),
             ddgs_backends=os.environ.get("DDGS_BACKENDS", cls.ddgs_backends),
             search_timeout=_int("SEARCH_TIMEOUT", 30),
+            search_provider_deadline=_int("SEARCH_PROVIDER_DEADLINE", 12),
+            search_workers=_int("SEARCH_WORKERS", 4),
             tavily_api_key=os.environ.get("TAVILY_API_KEY", ""),
             brave_api_key=os.environ.get("BRAVE_API_KEY", ""),
             fetch_timeout=_int("FETCH_TIMEOUT", 25),

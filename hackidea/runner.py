@@ -27,6 +27,8 @@ class Runner:
         self.interactive = interactive
         self.ask = ask or input
         self.ctx: dict = {}
+        self.progress_callback = None
+        self.cancel_requested = False
 
     # ---- artifacts ----
     def new_run(self) -> Path:
@@ -61,14 +63,14 @@ class Runner:
 
     # ---- pipeline ----
     def run(self, context_text: str | None = None, resume_from: str | None = None,
-            only_stage: str | None = None) -> Path:
+            only_stage: str | None = None, parsed_context: dict | None = None) -> Path:
         from hackidea import context as context_stage
         from hackidea.stages import (research, ideation, filtering, scoring,
                                      adversarial, decision, blueprint)
         from hackidea.report import build_final
 
         handlers = {
-            "context": lambda: context_stage.run(self, context_text or ""),
+            "context": lambda: context_stage.run(self, context_text or "", parsed_context),
             "research": lambda: research.run(self),
             "ideation": lambda: ideation.run(self),
             "filtering": lambda: filtering.run(self),
@@ -131,6 +133,11 @@ class Runner:
                                         "status": "completed"})
             state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
             self.log(f"--- {name} done in {state['last_stage_seconds']}s")
+            if self.progress_callback:
+                self.progress_callback(name, i + 1, len(STAGE_ORDER))
+            if self.cancel_requested:
+                self.log(f"cancellation requested; stopped after {name}")
+                raise InterruptedError(f"run cancelled after {name}")
             if only_stage:
                 break
 

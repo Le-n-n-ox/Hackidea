@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, asdict
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
@@ -187,22 +188,40 @@ class MultiSearch:
     results. A provider that errors is skipped for that query, so one outage or
     rate limit cannot fail the run."""
 
-    def __init__(self, providers: list[tuple[str, object]]):
+    def __init__(self, providers: list[tuple[str, object]], deadline: int = 12,
+                 provider_interval: float = 0.5):
         self.providers = providers
+        self.deadline = deadline
+        self.provider_interval = provider_interval
+        self._pool = ThreadPoolExecutor(max_workers=max(1, len(providers)))
+        self._provider_locks = {name: threading.Lock() for name, _ in providers}
+        self._provider_last_call = {name: 0.0 for name, _ in providers}
 
     def _one(self, item: tuple[str, object], query: str, max_results: int) -> list[SearchHit]:
         name, provider = item
         try:
-            return provider.search(query, max_results=max_results)
+            with self._provider_locks[name]:
+                wait = self.provider_interval - (time.monotonic() - self._provider_last_call[name])
+                if wait > 0:
+                    time.sleep(wait)
+                self._provider_last_call[name] = time.monotonic()
+                return provider.search(query, max_results=max_results)
         except Exception as e:  # noqa: BLE001 - provider errors are expected
             print(f"    [search] {name} failed for {query[:60]!r}: {str(e)[:120]}",
                   file=sys.stderr, flush=True)
             return []
 
     def search(self, query: str, max_results: int = 8) -> list[SearchHit]:
-        with ThreadPoolExecutor(max_workers=len(self.providers)) as pool:
-            result_lists = list(pool.map(lambda item: self._one(item, query, max_results),
-                                         self.providers))
+        futures = [self._pool.submit(self._one, item, query, max_results)
+                   for item in self.providers]
+        result_lists = []
+        for item, future in zip(self.providers, futures):
+            try:
+                result_lists.append(future.result(timeout=self.deadline))
+            except FutureTimeout:
+                print(f"    [search] {item[0]} exceeded {self.deadline}s deadline for {query[:60]!r}",
+                      file=sys.stderr, flush=True)
+                result_lists.append([])
         return fuse_hits(result_lists, max_results)
 
 
@@ -237,7 +256,7 @@ def make_search(cfg, cache: DiskCache, mock=None):
     providers = [(n, _make_one(n, cfg, cache)) for n in names]
     if len(providers) == 1:
         return providers[0][1]
-    return MultiSearch(providers)
+    return MultiSearch(providers, deadline=cfg.search_provider_deadline)
 
 
 _DATE_META = ["article:published_time", "datePublished", "date", "publish-date",

@@ -49,7 +49,8 @@ def build_digest(sources: list[dict], limit: int = 40) -> str:
 
 
 def candidate_block(c: dict) -> str:
-    return (f"[{c['id']}] {c['name']} — {c['pitch']}\n"
+    scope_line = f"  judged demo scope: {c['demo_scope']}\n" if c.get("demo_scope") else ""
+    return (f"[{c['id']}] {c['name']} — {c['pitch']}\n{scope_line}"
             f"  problem: {c.get('problem','')} | evidence: {c.get('evidence_url','')}\n"
             f"  user: {c.get('target_user','')} | AI core: {c.get('ai_core','')}\n"
             f"  why now: {c.get('why_now','')} | angle: {c.get('angle','')} | "

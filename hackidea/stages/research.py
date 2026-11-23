@@ -17,6 +17,25 @@ TAKEAWAYS_SCHEMA = {
                        "date_hint": {"type": "string"}}}}},
 }
 
+PROBLEMS_SCHEMA = {"type": "object", "required": ["problems"], "properties": {
+    "problems": {"type": "array", "items": {"type": "object",
+        "required": ["who", "task", "evidence_url"], "properties": {
+            "who": {"type": "string"}, "task": {"type": "string"},
+            "evidence_url": {"type": "string"}}}}}}
+
+
+def _theme_relevant(theme: str, page: dict) -> bool:
+    import re
+    text = " ".join((page.get("title", ""), page.get("text", ""), page.get("snippet", ""))).lower()
+    terms = {x for x in re.findall(r"[a-z0-9]+", theme.lower())
+             if len(x) > 3 and x not in {"solutions", "solution", "program", "global"}}
+    aliases = {"edtech": {"education", "learning", "learner", "teacher", "school", "student"},
+               "education": {"edtech", "learning", "learner", "teacher", "school", "student"},
+               "hospitality": {"hotel", "tourism", "travel", "guest", "restaurant", "tour"},
+               "tourism": {"hotel", "hospitality", "travel", "guest", "restaurant", "tour"}}
+    expanded = terms | set().union(*(aliases.get(t, set()) for t in terms)) if terms else set()
+    return not expanded or sum(t in text for t in expanded) >= 1
+
 _TYPE_FALLBACK_QUERY = {
     "past_winners": "{theme} hackathon winners devpost {recent_years}",
     "sponsor_apis": "{sponsor} API new features launch {year}",
@@ -60,6 +79,24 @@ def run(runner) -> dict:
     plan = runner.llm.complete_json(system, user, schemas.QUERY_PLAN_SCHEMA,
                                     stage="research_plan", max_tokens=4500)
     queries = _ensure_coverage(plan["queries"], ctx, n)
+    # Reserve at least one third of quick searches for real user pain. The model
+    # plan remains useful for phrasing; this invariant fixes source coverage.
+    target_problems = max(4, n // 3)
+    problem_count = sum(q["source_type"] == "user_problems" for q in queries)
+    year = datetime.now(timezone.utc).year
+    values = {"theme": ctx.get("theme", ""), "sponsor": "",
+              "region": ctx.get("audience_region") or "Africa", "year": year,
+              "recent_years": f"{year-1}/{year}"}
+    for i in range(target_problems - problem_count):
+        counts = {t: sum(q["source_type"] == t for q in queries) for t in SOURCE_TYPES}
+        replace_at = next((j for j in range(len(queries) - 1, -1, -1)
+                           if queries[j]["source_type"] != "user_problems"
+                           and counts[queries[j]["source_type"]] > 1), None)
+        if replace_at is None:
+            break
+        queries[replace_at] = {"query": _TYPE_FALLBACK_QUERY["user_problems"].format(
+            **values),
+            "source_type": "user_problems", "rationale": "enforced user problem coverage"}
     runner.save("research_plan.json", {"queries": queries})
     runner.log(f"research plan: {len(queries)} queries, {len({q['source_type'] for q in queries})} source types")
 
@@ -67,8 +104,10 @@ def run(runner) -> dict:
     search_started = time.perf_counter()
     seen: set[str] = set()
     hits: list[dict] = []
-    for i, q in enumerate(queries):
-        results = runner.search.search(q["query"], max_results=8)
+    workers = min(getattr(runner.cfg, "search_workers", 4), len(queries))
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        results_by_query = list(pool.map(lambda q: runner.search.search(q["query"], max_results=8), queries))
+    for i, (q, results) in enumerate(zip(queries, results_by_query)):
         added = 0
         for h in results:
             url = normalize_url(h.url)
@@ -79,7 +118,6 @@ def run(runner) -> dict:
                          "query": q["query"], "source_type": q["source_type"]})
             added += 1
         runner.log(f"  search {i+1}/{len(queries)} [{q['source_type']}] +{added} ({q['query'][:60]})")
-        time.sleep(0.15)
     search_seconds = round(time.perf_counter() - search_started, 2)
     runner.save("search_results.json", {"hits": hits})
 
@@ -150,6 +188,27 @@ def run(runner) -> dict:
     for s in sources:
         if not s["takeaway"]:
             s["takeaway"] = (s["snippet"] or s["title"])[:200]
+
+    # Relevance and problem extraction are enforced before ideation consumes sources.
+    for s in sources:
+        s["relevant"] = bool(s.get("fetched") and _theme_relevant(ctx.get("theme", ""), s))
+    problems = []
+    relevant_pages = [s for s in sources if s.get("relevant") and s.get("source_type") == "user_problems"]
+    if relevant_pages:
+        page_text = "\n\n".join(f"URL: {s['url']}\nTITLE: {s['title']}\nTEXT: {s.get('text','')[:1400]}" for s in relevant_pages[:12])
+        try:
+            extracted = runner.llm.complete_json(
+                "Extract distinct concrete user problems shown by these pages. Do not infer beyond page text.",
+                f"Theme: {ctx.get('theme')}\n{page_text}\nReturn who, task and evidence_url.",
+                PROBLEMS_SCHEMA, stage="research_problems", max_tokens=3500)
+            allowed = {s["url"] for s in relevant_pages}
+            for item in extracted["problems"]:
+                url = normalize_url(item["evidence_url"])
+                if url in allowed and item["who"].strip() and item["task"].strip():
+                    problems.append({"who": item["who"].strip(), "task": item["task"].strip(), "evidence_url": url})
+        except Exception as exc:
+            runner.log(f"  problem extraction failed ({type(exc).__name__})")
+    runner.save("problems.json", {"problems": problems})
 
     stats = {"queries_executed": len(queries),
              "source_types": sorted({q["source_type"] for q in queries}),

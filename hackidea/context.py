@@ -7,7 +7,10 @@ import re
 from hackidea import schemas
 
 SYSTEM = ("You extract structured hackathon context from free text. Be literal: only "
-          "record what the text states. Unknown fields get empty values, never guesses.")
+          "record what the text states. Unknown fields get empty values, never guesses. "
+          "The event's intended audience, target attendees, eligibility, and participant profile are NOT "
+          "the submitting user's team. Populate team only from an explicit statement about the user's "
+          "own team or members. A host/sponsor whose APIs are required, judged, or provided is a sponsor.")
 
 
 def _normalize(data: dict) -> dict:
@@ -44,6 +47,30 @@ def _normalize(data: dict) -> dict:
     return data
 
 
+def parse_fields(runner, raw_text: str) -> dict:
+    user = ("Extract the hackathon context below into JSON with keys: theme, hackathon_name, "
+            "tracks[], sponsors[], sponsor_apis[], judging_criteria{name:weight}, duration_hours, "
+            "team[{role, skills[]}], preferred_tech[], banned_tech[], budget_constraints, "
+            "audience_region, extra_notes. Intended attendees must never be recorded as the user's team.\n\nCONTEXT:\n" + raw_text)
+    data = _normalize(runner.llm.complete_json(SYSTEM, user, schemas.CONTEXT_SCHEMA,
+                                               stage="context", max_tokens=2500))
+    lower = raw_text.casefold()
+    attendee_section = re.search(r"(?:target attendees|who should attend|ideal for|open to|target audience)(.{0,1200})",
+                                 lower, re.S)
+    explicit_team = re.search(r"(?:my|our|we have|team consists of|team members are)\s+(?:team|members|developers|designers)", lower)
+    if attendee_section and not explicit_team:
+        data["team"] = []
+    brand = "Africa's Talking" if "africa's talking" in lower or "africaâ€™s talking" in lower else ""
+    if brand and re.search(r"(?:api|apis|platform|powered|host|sponsor|use|judg|criteria|sms|ussd|voice)", lower):
+        if brand not in data["sponsors"]:
+            data["sponsors"].append(brand)
+    if not data["sponsor_apis"] and brand:
+        found = [api for api in ("SMS", "USSD", "Voice", "Airtime", "Insights", "Chat")
+                 if re.search(rf"\b{re.escape(api.casefold())}\b", lower)]
+        data["sponsor_apis"] = found
+    return data
+
+
 def _missing_questions(ctx: dict) -> list[str]:
     qs = []
     if not ctx.get("theme"):
@@ -55,13 +82,8 @@ def _missing_questions(ctx: dict) -> list[str]:
     return qs[:3]
 
 
-def run(runner, raw_text: str) -> dict:
-    user = ("Extract the hackathon context below into JSON with keys: theme, hackathon_name, "
-            "tracks[], sponsors[], sponsor_apis[], judging_criteria{name:weight}, duration_hours, "
-            "team[{role, skills[]}], preferred_tech[], banned_tech[], budget_constraints, "
-            "audience_region, extra_notes.\n\nCONTEXT:\n" + raw_text)
-    data = _normalize(runner.llm.complete_json(SYSTEM, user, schemas.CONTEXT_SCHEMA,
-                                               stage="context", max_tokens=2500))
+def run(runner, raw_text: str, parsed: dict | None = None) -> dict:
+    data = parsed or parse_fields(runner, raw_text)
 
     questions: list[str] = []
     answers: list[str] = []

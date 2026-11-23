@@ -1,0 +1,132 @@
+Africa's Talking Women in Tech Hackathon: Edtech Solutions - Nairobi
+Nov 25, 8:00 AM â€“ 7:00 PM (EAT)
+
+Africa's Talking Women in Tech Community
+
+Join Africa's Talking Women in Tech Nairobi for an EdTech hackathon. Open to developers, educators, and tech enthusiasts, participants will use Africaâ€™s Talking APIs to create innovative solutions for accessible and engaging learning. Network, innovate, and win prizes while addressing real education challenges. A unique chance to transform education across Africa.
+90 RSVPs
+-
+-
+-
+-
+-
+Log in to RSVP
+Discussions
+Login to add discussion
+No discussions are currently posted
+Login to add discussion
+About this event
+#BuildwithAT #WeloveNerds #WomenInTech #EdTech
+
+Overview:
+Join Africa's Talking Women in Tech Nairobi for an exciting hackathon focused on EdTech Solutions, where technology meets creativity to transform how people learn, teach, and access education.
+
+Education opens doors for learning, growth, careers, and community development. However, delivering quality education involves much more than a classroom and a curriculum. Learners face limited internet access, scarce resources, and language barriers. Teachers and school administrators have to manage attendance, assessments, schedules, fee reminders, parent communication, and learner engagement, often across multiple platforms.
+
+This hackathon challenges participants to explore how technology can make learning more accessible, engaging, and effective, including for learners who only have a basic phone.
+
+Whether it is delivering lessons by SMS, running quizzes over USSD, reaching parents through voice broadcasts, rewarding learners with airtime, or helping schools coordinate their teams, participants will have the opportunity to build practical technology solutions for real-world education challenges.
+
+Using Africaâ€™s Talking APIs (SMS, USSD, Voice, AirtimeÂ and Data, Insights, Chat and more), participants will develop solutions that make education more inclusive, accessible, engaging, and easier to manage.
+
+Whether you are a developer, student, educator, entrepreneur, designer, creative, or technology enthusiast, this hackathon is an opportunity to collaborate, innovate, and build solutions that can transform education.
+
+
+Why Attend?
+- Solve Real Education Challenges.
+- Make Learning Accessible on Any Phone.
+- Improve School and Parent Communication.
+- Improve Teacher and Administrator Coordination.
+- Create Better Learner Experiences
+
+Key Focus Areas:
+Learner registration & enrolment:
+- Let learners and parents register and confirm enrolment from any phone.
+- API Link: USSD API
+Lessons, reminders & schedule updates:
+- Send daily lessons, assignment deadlines, exam reminders, and timetable changes automatically.
+- API Link: SMS API
+Parent & school announcements:
+- Voice broadcasts for priority notices, including in local languages.
+- API Link: Voice API
+Learning rewards:
+- Reward attendance, quiz scores, and course completion with airtime.
+- API Link: Airtime API
+Quizzes & live feedback:
+- Run quick quizzes and capture real-time learner and parent feedback.
+- API Link: USSD API
+Teacher & school coordination:
+- Notify and align teachers, administrators, and staff.
+- API Link: SMS API
+
+
+Target Attendees:
+This hackathon is open to:
+- Software Developers and Engineers
+- Data Scientists and AI Enthusiasts
+- Students and Technology Enthusiasts
+- Teachers, Educators, and School Administrators
+- Education Professionals and Curriculum Developers
+- Entrepreneurs and Startup Founders
+- Designers and Creatives
+- Anyone interested in using technology to improve education
+
+What to Expect:
+ðŸš€ Hands-on Building: Work on innovative ideas and create working solutions.
+
+ðŸ¤ Networking: As a member of our community, you'll have the opportunity to connect with like-minded individuals, potential collaborators, and industry professionals. Build valuable relationships that can propel your career or projects to new heights.
+
+ðŸ’¡ Learning Opportunities: Explore Africa's Talking APIs and discover how they can power your solutions.
+
+ðŸŽ¤ Mentorship: Get
+
+guidance and feedback from experienced technology professionals.
+
+ðŸ† Recognition and Rewards: Showcase your project and stand a chance to win exciting prizes and recognition.
+
+
+Solution Criteria:
+- Use of Africa's Talking APIs: How effectively the project utilizes one or more of the Africa's Talking APIs i.e. SMS, USSD, Airtime, Voice, Insights, Chat.
+- Innovation: The originality and creativity of the project idea and implementation.
+- User Experience: How well the project meets user needs and provides an intuitive and seamless experience.
+- Functionality: How well the project performs the intended functionality and handles errors and edge cases.
+- Presentation: The clarity and effectiveness of the project demonstration and pitch.
+New to Africa's Talking? Get started here.
+Publish on Africa's Talking Marketplace
+Marketplace : Publish your plugin/app for our customer and Call Back as a Service
+
+Learn more about the Marketplace and connect with other builders in the community forum: https://community.africastalking.com/forum/marketplace-18239/
+
+Developer Documentation (We welcome feedback)
+
+THEME: Edtech Solutions
+
+The winning solution will receive cash prizes as follows:
+- Winner - $100
+- 1st Runners Up - $50
+- 2nd Runners Up - $25
+Social Media give-aways too!
+
+More exclusive prizes and giveaways to attendees.
+
+Contribute to open-source.
+
+Agenda:
+
+1. Introductions
+
+2. Overview
+- Technical hands-on session
+3. Ideation
+- Form teams where need be.
+- Feedback
+4. Building/hacking: Code in GitHub/GitLab/BitBucket and deploy in Docker/Automated CI/Travis CI/Bamboo
+
+5. Demonstration and Wrap-up
+- Teams or individuals will demonstrate what they have hacked for feedback or adoption.
+Note: Carry a laptop
+
+Opportunities:
+- Network
+- Innovate
+- Access to our Talent bench (You can get a

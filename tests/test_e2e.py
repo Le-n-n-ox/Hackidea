@@ -103,8 +103,8 @@ def _takeaways(text):
 def _search_hits(query):
     i = len(getattr(_search_hits, "_calls", []))
     _search_hits._calls = getattr(_search_hits, "_calls", []) + [query]
-    return [{"url": f"https://example.com/s{(i * 2) % 6}", "title": f"Source {i}a", "snippet": "mock snippet"},
-            {"url": f"https://example.com/s{(i * 2 + 1) % 6}", "title": f"Source {i}b", "snippet": "mock snippet"}]
+    return [{"url": f"https://example.com/s{i * 2}", "title": f"Source {i}a", "snippet": "mock snippet"},
+            {"url": f"https://example.com/s{i * 2 + 1}", "title": f"Source {i}b", "snippet": "mock snippet"}]
 
 
 BP = {
@@ -177,7 +177,8 @@ def test_end_to_end(tmp_path, scripts):
         try:
             time.sleep(0.02)
             return {"url": url, "final_url": url, "title": "Fetched " + url,
-                    "date": "2026-05-01", "text": "mock page text " * 80}
+                    "date": "2026-05-01", "text": ("mock page about financial inclusion, financial services, "
+                    "mobile money and the needs of people excluded from banking. ") * 40}
         finally:
             with fetch_lock:
                 active_fetches -= 1

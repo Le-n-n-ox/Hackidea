@@ -128,17 +128,16 @@ class OpenAICompatLLM(BaseLLM):
         self.cfg = cfg
         self.session = requests.Session()
         self.request_count = 0
-        nvidia_endpoint = cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
         self.uses_mistral_large_4 = (
-            nvidia_endpoint and cfg.llm_model == "mistralai/mistral-large-4-1t-a52b"
+            cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
+            and cfg.llm_model == "mistralai/mistral-large-4-1t-a52b"
         )
         self.uses_nemotron_bolt = (
-            nvidia_endpoint and cfg.llm_model == "nvidia/nemotron-3.5-bolt-e4b"
+            cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
+            and cfg.llm_model == "nvidia/nemotron-3.5-bolt-e4b"
         )
-        self.supports_json_schema = (
-            self.uses_mistral_large_4 or self.uses_nemotron_bolt
-        )
-        self.supports_json_mode = self.supports_json_schema
+        self.supports_json_schema = cfg.llm_structured_output == "json_schema"
+        self.supports_json_mode = cfg.llm_structured_output in ("json_schema", "json_object")
         self.needs_reasoning_headroom = self.uses_mistral_large_4
 
     def chat(self, messages: list[dict], max_tokens: int | None = None,

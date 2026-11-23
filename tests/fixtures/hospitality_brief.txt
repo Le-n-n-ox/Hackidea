@@ -1,0 +1,72 @@
+Africa's Talking Open Hackathon: Hospitality & Tourism - Nairobi Kenya
+Nov 26, 8:00 AM â€“ 8:00 PM (EAT)
+
+Africaâ€™s Talking Open Community | East Africa
+
+Join the Hospitality & Tourism Hackathon to revolutionize African travel. Developers, designers, and entrepreneurs tackle challenges like fragmented booking and payment issues. Create scalable solutions to boost digital adoption and empower communities. Ideal for tech enthusiasts aiming to innovate and make a real-world impact.
+147 RSVPs
+-
+-
+-
+-
+-
+Log in to RSVP
+Discussions
+Login to add discussion
+Victor Muthomi
+12 days ago
+Impact of tourism in the Kenyan economy.
+According to articles in The Kenyan Wall Street ,and Kenya National Bureau Of Statistics (knbs), Tourism helped alot to boost the economy by 5.3% in the first quarter of the year. It is showing increase in number of visitors from other nations which is predicted to keep growing. Two of the main challenges tourism face are lack of adequate infrastru...
+0 comments
+About this event
+The Hospitality & Tourism Hackathon is a groundbreaking event focused on transforming how Africa welcomes, hosts, and serves travelers. Across the continent, the sector faces fragmented booking channels, low digital adoption among small hotels and tour operators, payment friction for local and international guests, seasonal demand swings, and limited tools for communities to benefit from tourism. This hackathon invites developers, designers, data scientists, and entrepreneurs to build practical, scalable solutions tailored to the realities of African hospitality and tourism.
+
+
+Addressable Problems in Hospitality & Tourism Solutions
+- Booking & Reservation Management - Build lightweight booking platforms for small hotels, guesthouses, Airbnbs, and restaurants that take reservations via USSD, SMS, or Voice and send automated confirmations and reminders.
+- Guest Payments & Deposits - Create payment tools for room deposits, split bills, tips, and tour fees through M-Pesa integration, with instant SMS receipts and refund tracking.
+- Guest Experience & Concierge Automation - Develop AI-powered Voice/Chat concierge services, SMS-based check-in/check-out, room service ordering, and feedback collection that reduce front-desk load.
+- Tour Operator & Guide Management - Build tools for tour operators to manage itineraries, guide assignments, vehicle dispatch, and group communication through SMS and Voice alerts.
+- Traveler Safety & Emergency Alerts - Develop real-time safety platforms that push travel advisories, weather warnings, park or road closures, and emergency contacts to travelers via SMS and Voice.
+- Community & Rural Tourism Enablement - Create mobile-first tools that help homestays, cultural villages, artisans, and local guides list services, take bookings, and receive payments via USSD/SMS with minimal data needs.
+- Destination Discovery & Local Content - Build platforms that deliver curated attraction guides, event listings, local food recommendations, and cultural information via SMS/USSD, Voice, or subscription services.
+- Hospitality Workforce & Staffing - Develop tools for shift scheduling, casual staff recruitment, attendance tracking, and payroll disbursement via M-Pesa for hotels, restaurants, and event venues.
+- Revenue Management & Analytics - Create dashboards for occupancy tracking, dynamic pricing, seasonal demand forecasting, and reconciliation of bookings and payments across channels.
+- Loyalty & Repeat Guest Engagement - Build loyalty programs, airtime-based rewards, personalized SMS offers, and referral systems that turn one-time visitors into returning guests.
+- Sustainable & Eco-Tourism - Develop tools that track and report on conservation fees, wildlife sightings, carbon footprint, and community revenue sharing, giving travelers transparency on their impact.
+- Accessibility & Inclusive Travel - Make travel services accessible to visually impaired, elderly, low-literacy, and non-English-speaking travelers through Voice IVR, simplified USSD menus, and local-language SMS.
+
+
+Objectives
+- Digitize African Hospitality:
+
+Create solutions that help hotels, restaurants, tour operators, and attractions reach more guests and run more efficiently.
+- Foster Local Innovation: Empower African builders to solve the continentâ€™s unique travel, hospitality, and destination management challenges.
+- Promote Inclusive Tourism: Build tools that let rural communities, small businesses, and informal operators take part in and benefit from the tourism economy.
+- Encourage Responsible Development: Prioritize guest data privacy, secure payments, fraud prevention, sustainability, and ethical AI in hospitality platforms.
+- Enable Impact at Scale: Ensure solutions can grow to serve millions of travelers, businesses, and destinations across Africa.
+
+Target Attendees
+- Developers & Engineers
+- Hospitality & Tourism Professionals
+- AI/ML & Data Scientists
+- Engineering & Hospitality Students
+- Social Entrepreneurs & NGOs
+- UX/UI Designers
+- Tour Operators & Travel Startups
+
+Why Participate
+- Access to Tools & APIs
+- Mentorship & Workshops
+- Collaborative Innovation
+- Cash Prizes & Recognition
+- Real-World Impact
+- Talent & Gig Opportunities
+Prizes
+The winning solution will receive cash prizes as follows:
+- Winner - $100 (Join Marketplace Program)
+- 1st Runners Up - $50
+- 2nd Runners Up - $25
+Africa's Talking powers communications solutions across Africa with simplified access to telco infrastructure. Developers use our powerful SMS, USSD, Voice, Chat, Airtime and Mobile Data to bring their ideas to life, as they build and sustain scalable businesses.
+
+Note: Carry a laptop

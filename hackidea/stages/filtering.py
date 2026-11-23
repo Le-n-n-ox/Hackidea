@@ -5,6 +5,26 @@ from hackidea import prompts, schemas
 from hackidea.search import normalize_url
 
 
+_THEME_CUES = {
+    "edtech": {"education", "educational", "learning", "learner", "teacher", "school", "student", "lesson", "quiz", "classroom", "curriculum"},
+    "hospitality": {"hospitality", "tourism", "tour", "hotel", "guest", "travel", "restaurant", "destination", "booking", "guide"},
+}
+
+
+def _hard_guard(ctx: dict, candidate: dict) -> str | None:
+    theme = str(ctx.get("theme", "")).lower()
+    domain = next((name for name in _THEME_CUES if name in theme), None)
+    if domain:
+        words = " ".join(str(candidate.get(k, "")) for k in ("name", "pitch", "problem", "target_user")).lower()
+        if not any(cue in words for cue in _THEME_CUES[domain]):
+            return f"Off-theme: no {domain} user, task, or outcome in the candidate."
+    if ctx.get("duration_hours") and ctx["duration_hours"] <= 12:
+        if any(term in (candidate.get("data_needed", "") + " " + candidate.get("pitch", "")).lower()
+               for term in ("train a model", "collect a dataset", "integrate bank", "production deployment")):
+            return "Infeasible in the stated short event: the described scope depends on training, new data collection, or a production integration."
+    return None
+
+
 def _decision(runner, candidate, digest, stage):
     system, user = prompts.filter_one(runner.ctx, candidate, digest)
     result = runner.llm.complete_json(system, user, schemas.FILTER_SCHEMA,
@@ -25,14 +45,22 @@ def run(runner) -> dict:
 
     decisions = {}
     for candidate in candidates:
+        duration = ctx.get("duration_hours") or 0
+        candidate["demo_scope"] = (
+            f"In {duration:g} hours, implement one end-to-end {candidate.get('problem','user problem')} workflow "
+            "with a single screen/action, one AI result grounded in the selected fetched evidence, and 5-10 "
+            "hand-authored or synthetic fixtures. Mock external APIs; no live account or production integration.")
         stage = f"filter_{candidate['id']}"
         try:
             row = _decision(runner, candidate, digest, stage)
         except Exception as exc:
-            runner.log(f"  filter failed for {candidate['id']}: {type(exc).__name__}; kept for review")
-            row = {"id": candidate["id"], "keep": True,
-                   "reason": "LLM classification failed; retained with low confidence for manual review",
-                   "category": "ok", "needs_saturation_check": True}
+            runner.log(f"  filter failed for {candidate['id']}: {type(exc).__name__}; discarded conservatively")
+            row = {"id": candidate["id"], "keep": False,
+                   "reason": "Filtering could not verify this idea; discarded conservatively.",
+                   "category": "infeasible", "needs_saturation_check": False}
+        guard = _hard_guard(ctx, candidate)
+        if guard:
+            row.update(keep=False, reason=guard, category="offtheme" if guard.startswith("Off-theme") else "infeasible")
         decisions[candidate["id"]] = row
 
     # Search saturation in code for a deterministic shortlist of survivors, even if the
@@ -91,6 +119,7 @@ def run(runner) -> dict:
         runner.save("research_log.json", research)
 
     kept = [c for c in candidates if decisions[c["id"]].get("keep")]
+    runner.save("candidates.json", {"candidates": candidates})
     result = {"decisions": [decisions[c["id"]] for c in candidates],
               "kept_ids": [c["id"] for c in kept], "saturation_checks": checks}
     runner.save("filtering.json", result)
