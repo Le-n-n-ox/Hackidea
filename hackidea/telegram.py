@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import mimetypes
 import re
 import shutil
 import sys
@@ -124,7 +125,8 @@ class TelegramBot:
             response = self._session().post(
                 API_ROOT.format(token=self.token, method="sendDocument"),
                 data={"chat_id": chat_id, "caption": caption},
-                files={"document": (path.name, document, "text/markdown")},
+                files={"document": (path.name, document,
+                                    mimetypes.guess_type(path.name)[0] or "application/octet-stream")},
                 timeout=60,
             )
         response.raise_for_status()
@@ -181,6 +183,8 @@ class TelegramBot:
         if command == "/last":
             report = self.state.get("last_report")
             if report and Path(report).exists(): self.send_document(chat_id, Path(report), "Most recent report.")
+            elif self.state.get("last_markdown") and Path(self.state["last_markdown"]).exists():
+                self.send_document(chat_id, Path(self.state["last_markdown"]), "Most recent report (Markdown).")
             else: self.send(chat_id, "No completed report is available.")
             return
         if command == "/alternatives":
@@ -328,14 +332,16 @@ class TelegramBot:
                 return
 
             report_path = run_dir / "final_report.md"
-            if not report_path.exists():
+            pdf_path = run_dir / "final_report.pdf"
+            if not report_path.exists() or not pdf_path.exists():
                 self.send(chat_id, "The run finished, but no report file was written.")
                 return
             try:
-                self.state["last_report"] = str(report_path); self._save_state()
+                self.state["last_report"] = str(pdf_path)
+                self.state["last_markdown"] = str(report_path); self._save_state()
                 self.state["last_run_dir"] = str(run_dir); self._save_state()
                 self.send(chat_id, self._summary(run_dir))
-                self.send_document(chat_id, report_path, "Your HackIdea report is ready.")
+                self.send_document(chat_id, pdf_path, "Your HackIdea build plan is ready.")
             except (Exception, SystemExit) as exc:
                 # The pipeline succeeded; keep that distinct from a Telegram upload failure.
                 reason = safe_telegram_failure_hint(exc)
@@ -366,7 +372,10 @@ class TelegramBot:
             report = target / "final_report.md"
             alt_report = target / f"alternative_{candidate_id}_blueprint.md"
             report.replace(alt_report)
-            self.send_document(chat_id, alt_report, f"Alternative blueprint for {candidate_id}.")
+            pdf = target / "final_report.pdf"
+            alt_pdf = target / f"alternative_{candidate_id}_blueprint.pdf"
+            pdf.replace(alt_pdf)
+            self.send_document(chat_id, alt_pdf, f"Alternative blueprint for {candidate_id}.")
         except Exception as exc:
             self.send(chat_id, f"Alternative blueprint failed ({type(exc).__name__}).")
 

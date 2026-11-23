@@ -54,6 +54,31 @@ def test_command_handlers_depth_status_cancel(tmp_path):
     assert "cleared" in bot.messages[-1][1]
 
 
+def test_pdf_delivery_uses_pdf_mime_with_fake_telegram_api(tmp_path):
+    class Response:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"ok": True}
+
+    class FakeAPI:
+        def __init__(self):
+            self.calls = []
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return Response()
+
+    bot = FakeTelegram(tmp_path)
+    fake_api = FakeAPI()
+    bot._sessions.session = fake_api
+    pdf = tmp_path / "plan.pdf"
+    pdf.write_bytes(b"%PDF-fake")
+    TelegramBot.send_document(bot, 10, pdf, "Plan")
+    upload = fake_api.calls[0][1]
+    assert upload["files"]["document"][0] == "plan.pdf"
+    assert upload["files"]["document"][2] == "application/pdf"
+
+
 def test_context_parser_separates_attendees_and_infers_api_sponsor(tmp_path):
     brief = Path(__file__).parent / "fixtures" / "hospitality_brief.txt"
     text = brief.read_text(encoding="utf-8")
