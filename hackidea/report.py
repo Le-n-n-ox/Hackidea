@@ -98,22 +98,20 @@ def build_final(runner) -> str:
         parts[3] = parts.get(3, "## 3. Tech stack") + f"\n\n**External claims:** {verification_note}"
 
     # --- header ---
-    safe_pitch = ("A prototype that reviews synthetic examples related to this idea and flags cases for a person "
-                  "to review; it does not access real accounts or take external actions.")
+    pitch = winner.get("pitch", "").strip() or winner.get("problem", "").strip()
     problem_hypothesis = winner.get("problem", "")
     target_user = winner.get("target_user", "")
     parts[1] = ("## 1. Idea\n"
                 f"**Name:** {winner['name']}  \n"
-                f"**Pitch:** {safe_pitch}  \n"
+                f"**Pitch:** {pitch}  \n"
                 f"**Problem hypothesis:** {problem_hypothesis}  \n"
                 f"**Target user:** {target_user}  \n"
-                "**Why now:** Verify the supporting trend and any numeric claims against the linked source before presenting them.  \n"
-                "**AI core:** Classify synthetic demo fixtures and provide an advisory explanation for a human to review. "
-                "Do not collect credentials, PINs, OTPs, or private account records; do not monitor real authorization "
-                "prompts or approve, block, or initiate transactions.")
+                f"**Why now:** {winner.get('why_now', '')}  \n"
+                f"**AI core:** {winner.get('ai_core', '')}  \n"
+                "**Verification note:** Check external claims and API capabilities against current sources before relying on them.")
 
     head = [f"# {winner['name']} — HackIdea build blueprint",
-            f"*{safe_pitch}*", "",
+            f"*{pitch}*", "",
             f"- **Theme:** {ctx.get('theme', '')}",
             f"- **Duration:** {ctx.get('duration_hours')}h | **Team:** "
             + ", ".join(m['role'] for m in ctx.get('team', [])),
@@ -121,7 +119,7 @@ def build_final(runner) -> str:
             f"| **Generated:** {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"]
     if ctx.get("assumptions"):
         head.append("- **Assumptions:** " + " ".join(ctx["assumptions"]))
-    head += ["", "**Prototype and verification boundary:** This is a concept plan, not a confirmed production integration. "
+    head += ["", "**Prototype and verification boundary:** This is a concept plan, not a confirmed production integration; it does not access real accounts. "
              "Use synthetic data and simulated events. Product capabilities, external APIs, permissions, model choices, "
              "prices, and statistics elsewhere in this generated blueprint are research leads that need independent "
              "verification before use."]
