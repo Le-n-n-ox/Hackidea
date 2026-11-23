@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
+import json
 import re
+import shutil
 import sys
 import threading
 import time
@@ -67,6 +69,22 @@ class TelegramBot:
         self._sessions = threading.local()
         self._run_lock = threading.Lock()
         self._run_active = False
+        self._cancel_requested = False
+        self._state_path = Path("runs") / ".telegram_state.json"
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.state = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self.state = {"drafts": {}, "last_update_id": -1}
+        if self.state.get("active_run"):
+            self.state["interrupted_run"] = self.state.pop("active_run")
+            self._save_state()
+        self._run_active = False
+
+    def _save_state(self):
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self._state_path)
 
     def _session(self) -> requests.Session:
         """Keep requests sessions thread-local while a pipeline runs in the background."""
@@ -116,16 +134,17 @@ class TelegramBot:
 
     @staticmethod
     def help_text() -> str:
-        return (
-            "Send one message describing your hackathon (theme, duration, team, "
-            "sponsors, judging criteria, constraints). I’ll research it and return "
-            "the winning idea and build blueprint.\n\n"
-            "Commands:\n/start or /help — show this help\n/id — show your Telegram user ID\n"
-            "Each new text message starts a new run. Set DEPTH=quick for a faster, "
-            "lower-cost first run."
-        )
+        return ("Send the event brief in as many messages as needed. Then /review, correct with /set field value, "
+                "choose /depth quick|standard|deep, and /confirm to start.\n\n"
+                "Commands: /review /confirm /depth /set /status /cancel /alternatives /last /help /id")
 
     def handle(self, update: dict) -> None:
+        update_id = update.get("update_id")
+        if update_id is not None and update_id <= self.state.get("last_update_id", -1):
+            return
+        if update_id is not None:
+            self.state["last_update_id"] = update_id
+            self._save_state()
         message = update.get("message") or update.get("edited_message")
         if not message or not isinstance(message.get("text"), str):
             return
@@ -144,49 +163,158 @@ class TelegramBot:
         if command == "/id":
             self.send(chat_id, f"Your Telegram user ID is {user_id}.")
             return
-        if command == "/cancel":
-            with self._run_lock:
-                active = self._run_active
-            if active:
-                self.send(chat_id, "A run is in progress. It cannot be cancelled, but I’ll send the report when it finishes.")
-            else:
-                self.send(chat_id, "There is no active run to cancel.")
-            return
-        if not text:
-            return
-        if user_id not in self.allowed_user_ids:
+        if user_id not in self.allowed_user_ids and command not in ("/start", "/help"):
             if not self.allowed_user_ids:
                 self.send(chat_id, "Runs are disabled until the owner is configured. Send /id, then add that number to TELEGRAM_ALLOWED_USER_IDS in .env and restart the bot.")
             else:
                 self.send(chat_id, "This bot is private. Your Telegram account is not on its allowed-user list.")
             return
-
-        cfg = Config.from_env()
-        with self._run_lock:
-            active = self._run_active
-            if not active:
-                self._run_active = True
-        if active:
-            self.send(chat_id, "A HackIdea run is already in progress. I’ll send its report before starting another.")
+        if command == "/status":
+            active = self.state.get("active_run")
+            interrupted = self.state.get("interrupted_run")
+            self.send(chat_id, f"Run stage: {active.get('stage', 'starting')}" if active else
+                      (f"The previous run stopped during {interrupted.get('stage', 'unknown')} after a restart." if interrupted else "No run is active."))
             return
-        try:
-            self.send(chat_id, f"Got it. Starting the {cfg.depth} HackIdea run now. This can take several minutes; I’ll send the report when it’s ready.")
-            worker = threading.Thread(
-                target=self._run_and_deliver,
-                args=(chat_id, text, cfg),
-                name="hackidea-run",
-                daemon=True,
-            )
-            worker.start()
-        except Exception:
+        if command == "/last":
+            report = self.state.get("last_report")
+            if report and Path(report).exists(): self.send_document(chat_id, Path(report), "Most recent report.")
+            else: self.send(chat_id, "No completed report is available.")
+            return
+        if command == "/alternatives":
+            latest = self.state.get("last_run_dir")
+            if not latest or not Path(latest, "candidates.json").exists():
+                self.send(chat_id, "No completed run has finalists yet."); return
+            run = Path(latest)
+            rows = json.loads((run / "candidates.json").read_text(encoding="utf-8"))["candidates"]
+            winner = json.loads((run / "decision.json").read_text(encoding="utf-8"))["winner_id"]
+            scores = {r["id"]: r for r in json.loads((run / "scoring_table.json").read_text(encoding="utf-8")).get("rows", [])}
+            finalist_ids = json.loads((run / "stability.json").read_text(encoding="utf-8")).get("final_order", [])
+            lines = [f"{c['id']}: {c['name']} — {c.get('pitch','')} (score {scores.get(c['id'],{}).get('weighted_total','?')})"
+                     for c in rows if c["id"] in finalist_ids and c["id"] != winner]
+            self.send(chat_id, "Other finalists:\n" + "\n".join(lines) + "\nRequest a blueprint with /blueprint candidate_id.")
+            return
+        if command == "/blueprint":
+            latest = self.state.get("last_run_dir")
+            candidate_id = text.partition(" ")[2].strip()
+            if not latest or not candidate_id:
+                self.send(chat_id, "Use /blueprint candidate_id after /alternatives."); return
+            source = Path(latest)
+            try:
+                rows = json.loads((source / "candidates.json").read_text(encoding="utf-8"))["candidates"]
+                candidate = next(c for c in rows if c["id"] == candidate_id)
+                finalists = json.loads((source / "stability.json").read_text(encoding="utf-8")).get("final_order", [])
+                if candidate_id not in finalists:
+                    raise StopIteration
+            except (OSError, ValueError, StopIteration):
+                self.send(chat_id, "That candidate ID is not in the most recent run."); return
+            self.send(chat_id, f"Building a separate blueprint for {candidate['name']}.")
+            threading.Thread(target=self._alternative_blueprint,
+                             args=(chat_id, source, candidate_id), daemon=True).start()
+            return
+        if command == "/cancel":
             with self._run_lock:
-                self._run_active = False
-            raise
+                active = self._run_active
+            if active:
+                self._cancel_requested = True
+                if getattr(self, "_runner", None) is not None:
+                    self._runner.cancel_requested = True
+                self.send(chat_id, "Cancellation requested. I’ll stop at the next stage boundary.")
+            else:
+                self.state.setdefault("drafts", {}).pop(str(user_id), None)
+                self._save_state()
+                self.send(chat_id, "No run is active; cleared the unconfirmed brief, if any.")
+            return
+        if command == "/depth":
+            value = text.partition(" ")[2].strip().lower()
+            if value not in ("quick", "standard", "deep"):
+                self.send(chat_id, "Choose /depth quick, /depth standard, or /depth deep."); return
+            draft = self.state.setdefault("drafts", {}).setdefault(str(user_id), {"text": ""})
+            draft["depth"] = value; self._save_state(); self.send(chat_id, f"Depth set to {value}."); return
+        if command == "/set":
+            fields = text.split(maxsplit=2)
+            if len(fields) < 3:
+                self.send(chat_id, "Use /set field value (theme, duration_hours, team, sponsors, sponsor_apis, judging_criteria, audience_region)."); return
+            draft = self.state.setdefault("drafts", {}).setdefault(str(user_id), {"text": "", "parsed": {}})
+            draft.setdefault("overrides", {})[fields[1]] = fields[2]
+            draft["reviewed"] = False; self._save_state(); self.send(chat_id, f"Updated {fields[1]}; use /review."); return
+        if command == "/review":
+            draft = self.state.get("drafts", {}).get(str(user_id))
+            if not draft or not draft.get("text"):
+                self.send(chat_id, "Send the hackathon brief first; parts are combined until you use /review."); return
+            try:
+                cfg = Config.from_env(depth=draft.get("depth"))
+                from hackidea.context import parse_fields
+                parsed = parse_fields(Runner(cfg), draft["text"])
+                parsed.update(self._overrides(draft.get("overrides", {})))
+                draft["parsed"] = parsed; draft["reviewed"] = True; self._save_state()
+                self.send(chat_id, self._review(parsed, draft.get("depth", cfg.depth)))
+            except Exception as exc:
+                self.send(chat_id, f"Could not parse the brief ({type(exc).__name__}). Add more detail and retry /review.")
+            return
+        if command == "/confirm":
+            draft = self.state.get("drafts", {}).get(str(user_id), {})
+            parsed = draft.get("parsed", {})
+            if draft.get("consumed"):
+                self.send(chat_id, "This confirmed brief was already submitted. Send a new brief to start another run."); return
+            if not draft.get("reviewed"):
+                self.send(chat_id, "Use /review before confirming."); return
+            missing = [k for k in ("theme", "duration_hours", "team") if not parsed.get(k)]
+            if missing:
+                self.send(chat_id, "Missing essentials: " + ", ".join(missing) + ". Set them with /set field value."); return
+            with self._run_lock:
+                if self._run_active:
+                    self.send(chat_id, "A run is already in progress."); return
+                self._run_active = True
+            cfg = Config.from_env(depth=draft.get("depth"))
+            self.state["active_run"] = {"chat_id": chat_id, "stage": "starting"}; self._save_state()
+            draft["consumed"] = True; self._save_state()
+            self.send(chat_id, f"Confirmed. Starting a {cfg.depth} run; /status shows progress and /cancel stops at a stage boundary.")
+            threading.Thread(target=self._run_and_deliver, args=(chat_id, draft["text"], cfg, parsed), daemon=True).start()
+            return
+        if not text:
+            return
 
-    def _run_and_deliver(self, chat_id: int, text: str, cfg: Config) -> None:
+        draft = self.state.setdefault("drafts", {}).setdefault(str(user_id), {"text": "", "depth": Config.from_env().depth})
+        draft["text"] = (draft.get("text", "") + "\n\n" + text).strip()
+        draft["reviewed"] = False; draft["consumed"] = False; self._save_state()
+        self.send(chat_id, f"Added {len(text)} characters ({len(draft['text'])} total). Send more, then /review when complete.")
+
+    @staticmethod
+    def _overrides(overrides: dict) -> dict:
+        out = {}
+        for key, value in overrides.items():
+            if key == "duration_hours":
+                m = re.search(r"\d+(?:\.\d+)?", str(value))
+                if m: out[key] = float(m.group())
+            elif key == "team": out[key] = [{"role": x.strip(), "skills": []} for x in str(value).split(",") if x.strip()]
+            elif key in ("sponsors", "sponsor_apis"): out[key] = [x.strip() for x in str(value).split(",") if x.strip()]
+            else: out[key] = value
+        return out
+
+    @staticmethod
+    def _review(ctx: dict, depth: str) -> str:
+        return ("What I understood:\n"
+                f"Theme: {ctx.get('theme') or 'MISSING'}\nDuration: {ctx.get('duration_hours') or 'MISSING'} hours\n"
+                "Your team: " + (", ".join(x.get("role", "") for x in ctx.get("team", [])) or "MISSING") + "\n"
+                "Sponsors: " + (", ".join(ctx.get("sponsors", [])) or "none found") + "\n"
+                "Required APIs: " + (", ".join(ctx.get("sponsor_apis", [])) or "none found") + "\n"
+                "Judging criteria: " + (", ".join(ctx.get("judging_criteria", {})) or "not found") + "\n"
+                f"Depth: {depth}\nAssumptions: {'; '.join(ctx.get('assumptions', [])) or 'none'}\n"
+                "Correct with /set field value; choose /depth; /confirm starts the run.")
+
+    def _run_and_deliver(self, chat_id: int, text: str, cfg: Config, parsed=None) -> None:
         try:
             try:
-                run_dir = Runner(cfg).run(context_text=text)
+                runner = Runner(cfg)
+                self._runner = runner
+                runner.new_run()
+                self.state.setdefault("active_run", {}).update(stage="context", run_dir=str(runner.run_dir))
+                self._save_state()
+                runner.progress_callback = self._stage_progress
+                run_dir = runner.run(context_text=text, parsed_context=parsed)
+            except InterruptedError:
+                self.send(chat_id, "Run cancelled at the stage boundary.")
+                return
             except (Exception, SystemExit) as exc:
                 print(f"[hackidea-telegram] run failed ({type(exc).__name__})", file=sys.stderr, flush=True)
                 try:
@@ -200,6 +328,9 @@ class TelegramBot:
                 self.send(chat_id, "The run finished, but no report file was written.")
                 return
             try:
+                self.state["last_report"] = str(report_path); self._save_state()
+                self.state["last_run_dir"] = str(run_dir); self._save_state()
+                self.send(chat_id, self._summary(run_dir))
                 self.send_document(chat_id, report_path, "Your HackIdea report is ready.")
             except (Exception, SystemExit) as exc:
                 # The pipeline succeeded; keep that distinct from a Telegram upload failure.
@@ -215,10 +346,47 @@ class TelegramBot:
         finally:
             with self._run_lock:
                 self._run_active = False
+                self._cancel_requested = False
+                self._runner = None
+                self.state.pop("active_run", None); self._save_state()
+
+    def _alternative_blueprint(self, chat_id: int, source: Path, candidate_id: str):
+        target = source.parent / f"{source.name}_alternative_{candidate_id}"
+        try:
+            shutil.copytree(source, target, dirs_exist_ok=True)
+            decision_path = target / "decision.json"
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            decision["winner_id"] = candidate_id
+            decision_path.write_text(json.dumps(decision, indent=2), encoding="utf-8")
+            Runner(Config.from_env(), run_dir=target).run(resume_from="blueprint", only_stage="blueprint")
+            report = target / "final_report.md"
+            alt_report = target / f"alternative_{candidate_id}_blueprint.md"
+            report.replace(alt_report)
+            self.send_document(chat_id, alt_report, f"Alternative blueprint for {candidate_id}.")
+        except Exception as exc:
+            self.send(chat_id, f"Alternative blueprint failed ({type(exc).__name__}).")
+
+    def _stage_progress(self, stage: str, number: int, total: int) -> None:
+        active = self.state.setdefault("active_run", {})
+        active["stage"] = stage; self._save_state()
+        self.send(active["chat_id"], f"Completed stage {number}/{total}: {stage}.")
+
+    @staticmethod
+    def _summary(run_dir: Path) -> str:
+        try:
+            decision = json.loads((run_dir / "decision.json").read_text(encoding="utf-8"))
+            candidates = json.loads((run_dir / "candidates.json").read_text(encoding="utf-8"))["candidates"]
+            winner = next(c for c in candidates if c["id"] == decision["winner_id"])
+            reviews = json.loads((run_dir / "redteam.json").read_text(encoding="utf-8"))["reviews"]
+            review = next(r for r in reviews if r["id"] == winner["id"])
+            risks = "; ".join(r.get("risk", "") for r in review.get("risks", [])[:2]) or "none recorded"
+            return f"Winner: {winner['name']}\n{winner.get('pitch','')}\nConfidence: {decision['confidence_level']} ({decision['confidence_pct']}%)\nTop risks: {risks}"
+        except Exception:
+            return "Your HackIdea run is complete."
 
     def run_forever(self) -> None:
         print("[hackidea-telegram] polling for Telegram messages", file=sys.stderr, flush=True)
-        offset = None
+        offset = int(self.state.get("last_update_id", -1)) + 1
         while True:
             try:
                 updates = self.api("getUpdates", offset=offset, timeout=25, allowed_updates=["message"])

@@ -26,7 +26,9 @@ Requires Python 3.11+.
 | `LLM_API_KEY` | API key (any string for local proxies) | — |
 | `LLM_MODEL` | exact model id | `gpt-4o-mini` |
 | `LLM_TIMEOUT` / `LLM_MAX_RETRIES` / `LLM_MAX_TOKENS` | HTTP behavior | 300 / 3 / 8000 |
-| `SEARCH_PROVIDER` | `ddgs` (free, no key), `tavily`, `brave`, a comma-separated list, or `all` (every provider with a key, plus ddgs). Several providers are queried in parallel and their results fused, with URLs that more than one engine returns ranked first | `ddgs` |
+| `LLM_STRUCTURED_OUTPUT` | `json_schema`, `json_object`, or `off` for structured LLM calls | `json_schema` |
+| `SEARCH_PROVIDER` | `ddgs` (free, no key), `tavily`, `brave`, a comma-separated list, or `all` (every provider with a key, plus ddgs). Providers are queried concurrently with a per-provider deadline | `ddgs` |
+| `SEARCH_PROVIDER_DEADLINE` / `SEARCH_WORKERS` | Seconds before a slow provider is skipped / concurrent search queries | 12 / 4 |
 | `DDGS_BACKENDS` | backends tried in order until one works | `google,duckduckgo,bing,mojeek` |
 | `TAVILY_API_KEY` / `BRAVE_API_KEY` | for keyed search providers | — |
 | `DEPTH` | `quick` / `standard` / `deep` | `standard` |
@@ -71,14 +73,14 @@ Progress logs go to stderr.
 
 ## Telegram chat interface
 
-The Telegram interface runs the same pipeline when you send it a text message. It uses long polling, so it does not need a public webhook URL.
+The Telegram interface uses long polling, so it does not need a public webhook URL. Brief messages accumulate until you review and confirm; split event pages are not launched as separate runs.
 
 1. In Telegram, message `@BotFather`, create a bot with `/newbot`, and copy its token into `.env` as `TELEGRAM_BOT_TOKEN`.
 2. Start the bot locally with `python -m hackidea.telegram`.
 3. Open your bot and send `/start`, then `/id`. Copy the numeric user ID into `.env` as `TELEGRAM_ALLOWED_USER_IDS` and restart the process.
-4. Send a detailed hackathon brief. Set `DEPTH=quick` in `.env` for a faster first run; use `standard` or `deep` for fuller research.
+4. Send the brief in one or more messages, then use `/review`. Correct fields with `/set field value`, select `/depth quick|standard|deep`, then `/confirm`.
 
-Pipeline runs are disabled until at least one allowed user ID is configured. Each text message from an allowed user starts a new run. The report and artifacts are saved under `runs/`; the bot sends `final_report.md` as a downloadable Telegram attachment (with a text fallback if upload fails). Keep `.env` private and do not share the bot token.
+Pipeline runs are disabled until at least one allowed user ID is configured. Commands: `/review`, `/confirm`, `/set`, `/depth`, `/status`, `/cancel` (stops at a stage boundary), `/alternatives`, `/blueprint candidate_id`, `/last`, `/help`, and `/id`. The bot stores its intake/update cursor in `runs/.telegram_state.json`, sends progress by stage, then a short winner summary and the report. Keep `.env` private and do not share the bot token.
 
 For an always-on hosted bot, deploy this as a Python background worker and start it with `python -m hackidea.telegram`. Add the same `.env` values as the host's secret/environment variables. The worker needs outbound HTTPS access to Telegram, the configured LLM, and search providers. The local run-artifact folder is not a durable backup on most hosts, so download important run artifacts or add persistent storage before relying on them.
 
@@ -87,9 +89,9 @@ For an always-on hosted bot, deploy this as a Python background worker and start
 | Stage | Artifact | What happens |
 |---|---|---|
 | 0 context | `context.json` | structured extraction; ≤3 clarifying questions or stated assumptions |
-| 1 research | `research_plan.json`, `search_results.json`, `research_log.json` | ≥N searches across ≥6 source types (winners, sponsor APIs, trending repos, models/papers, news, real problems, market, local); pages fetched; every source logged with URL/title/date/takeaway |
-| 2 ideation | `candidates.json` | 20–30 diverse AI-central candidates across 8 forced angles |
-| 3 filtering | `filtering.json` | discards infeasible / wrapper / saturated / off-theme; suspected saturation verified with extra searches |
+| 1 research | `research_plan.json`, `search_results.json`, `research_log.json`, `problems.json` | ≥6 source types with ≥⅓ of searches for user problems; concurrent searches, multiple pages per query, theme relevance gate, distinct fetched-page problems |
+| 2 ideation | `candidates.json` | Up to 12 quick-depth AI-central candidates seeded from the problem list and balanced across angles |
+| 3 filtering | `filtering.json` | Discards model-flagged and Python-guarded off-theme or plainly infeasible ideas; attaches a time-bounded demo scope |
 | 4 scoring | `weights.json`, `scoring_table.json/.md` | 0–10 on 6 dimensions, reweighted to judging criteria; totals computed in Python |
 | 5 adversarial | `redteam.json`, `tournament.json`, `stability.json` | red-team top 5, round-robin pairwise tournament, top-2 re-scored with reworded prompt + different seed; flips investigated |
 | 6 decision | `decision.json` | ONE winner, honest confidence + the assumption that would change the pick |
