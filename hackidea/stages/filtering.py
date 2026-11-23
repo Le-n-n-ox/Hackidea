@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 from hackidea.search import normalize_url
 
 
@@ -43,8 +44,7 @@ def run(runner) -> dict:
     digest = prompts.build_digest(research["sources"], 40)
     by_id = {c["id"]: c for c in candidates}
 
-    decisions = {}
-    for candidate in candidates:
+    def classify(candidate):
         duration = ctx.get("duration_hours") or 0
         candidate["demo_scope"] = (
             f"In {duration:g} hours, implement one end-to-end {candidate.get('problem','user problem')} workflow "
@@ -61,7 +61,23 @@ def run(runner) -> dict:
         guard = _hard_guard(ctx, candidate)
         if guard:
             row.update(keep=False, reason=guard, category="offtheme" if guard.startswith("Off-theme") else "infeasible")
-        decisions[candidate["id"]] = row
+        return row
+
+    outcomes = ordered_fanout(
+        candidates, classify, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("filtering classify", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("filtering classification cancelled")
+    decisions = {}
+    for candidate, outcome in zip(candidates, outcomes):
+        if outcome.error is None and outcome.value is not None:
+            decisions[candidate["id"]] = outcome.value
+        else:
+            runner.log(f"  filter item failed for {candidate['id']}; discarded conservatively")
+            decisions[candidate["id"]] = {"id": candidate["id"], "keep": False,
+                "reason": "Filtering item failed; discarded conservatively.",
+                "category": "infeasible", "needs_saturation_check": False}
 
     # Search saturation in code for a deterministic shortlist of survivors, even if the
     # model failed to ask. The cap keeps search/fetch volume near the original standard run.
@@ -73,37 +89,69 @@ def run(runner) -> dict:
         if c not in check_candidates and len(check_candidates) < 8:
             check_candidates.append(c)
 
-    checks, fetched_evidence = [], []
-    for candidate in check_candidates:
-        query = f'"{candidate["name"]}" {candidate.get("target_user", "")} {ctx.get("theme", "")} product'
-        found = []
-        for hit in runner.search.search(query, max_results=3)[:2]:
-            url = normalize_url(hit.url)
-            page = runner.fetch(url)
-            entry = {"url": url, "title": hit.title, "snippet": hit.snippet,
-                     "query": query, "source_type": "market_products", "fetched": bool(page),
-                     "date": (page or {}).get("date", ""), "text": (page or {}).get("text", ""),
-                     "takeaway": "Candidate saturation check; assess only the overlap supported by this page."}
-            found.append(entry)
-            if page:
-                fetched_evidence.append(entry)
-        checks.append({"id": candidate["id"], "query": query, "results": found})
-        runner.log(f"  saturation check {candidate['id']}: {sum(x['fetched'] for x in found)} pages fetched")
+    checks_by_id = {}
+    fetched_evidence = []
+    query_rows = [(c, f'"{c["name"]}" {c.get("target_user", "")} {ctx.get("theme", "")} product')
+                  for c in check_candidates]
+    search_outcomes = ordered_fanout(
+        query_rows, lambda row: runner.search.search(row[1], max_results=3)[:2],
+        workers=min(runner.cfg.search_workers, max(1, len(query_rows))),
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("filtering saturation search", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("filtering saturation searches cancelled")
+    fetch_rows = []
+    for (candidate, query), outcome in zip(query_rows, search_outcomes):
+        hits = outcome.value or []
+        checks_by_id[candidate["id"]] = {"id": candidate["id"], "query": query, "results": []}
+        for hit in hits:
+            fetch_rows.append((candidate, query, hit))
+    fetch_outcomes = ordered_fanout(
+        fetch_rows, lambda row: runner.fetch(normalize_url(row[2].url)),
+        workers=min(runner.cfg.search_workers, max(1, len(fetch_rows))),
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("filtering saturation fetch", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("filtering saturation fetches cancelled")
+    for (candidate, query, hit), outcome in zip(fetch_rows, fetch_outcomes):
+        page = outcome.value if outcome.error is None else None
+        url = normalize_url(hit.url)
+        entry = {"url": url, "title": hit.title, "snippet": hit.snippet,
+                 "query": query, "source_type": "market_products", "fetched": bool(page),
+                 "date": (page or {}).get("date", ""), "text": (page or {}).get("text", ""),
+                 "takeaway": "Candidate saturation check; assess only the overlap supported by this page."}
+        checks_by_id[candidate["id"]]["results"].append(entry)
+        if page:
+            fetched_evidence.append(entry)
+    checks = [checks_by_id[c["id"]] for c in check_candidates]
+    for check in checks:
+        runner.log(f"  saturation check {check['id']}: {sum(x['fetched'] for x in check['results'])} pages fetched")
 
-    # Revisit flagged or code-searched ideas only when new pages were actually fetched.
+    # Revisit each searched candidate independently; failed items retain their
+    # original decision while successful rechecks are applied in candidate order.
+    recheck_rows = []
     for check in checks:
         pages = [x for x in check["results"] if x["fetched"]]
-        if not pages:
-            continue
-        candidate = by_id[check["id"]]
-        extra = "\n".join(f"- {x['title']} | {x['url']} | {x['text'][:1000]}" for x in pages)
-        try:
-            revised = _decision(runner, candidate, digest + "\n\nNEW FETCHED SATURATION EVIDENCE:\n" + extra,
-                                f"filter_recheck_{candidate['id']}")
-            revised["saturation_reviewed"] = True
-            decisions[candidate["id"]] = revised
-        except Exception as exc:
-            runner.log(f"  saturation recheck failed for {candidate['id']}: {type(exc).__name__}")
+        if pages:
+            candidate = by_id[check["id"]]
+            extra = "\n".join(f"- {x['title']} | {x['url']} | {x['text'][:1000]}" for x in pages)
+            recheck_rows.append((candidate, digest + "\n\nNEW FETCHED SATURATION EVIDENCE:\n" + extra))
+    def recheck(row):
+        candidate, detail = row
+        revised = _decision(runner, candidate, detail, f"filter_recheck_{candidate['id']}")
+        revised["saturation_reviewed"] = True
+        return revised
+    recheck_outcomes = ordered_fanout(
+        recheck_rows, recheck, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("filtering recheck", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("filtering rechecks cancelled")
+    for (candidate, _), outcome in zip(recheck_rows, recheck_outcomes):
+        if outcome.error is not None:
+            runner.log(f"  saturation recheck failed for {candidate['id']}: {type(outcome.error).__name__}")
+        else:
+            decisions[candidate["id"]] = outcome.value
 
     if fetched_evidence:
         existing = {normalize_url(s["url"]) for s in research["sources"]}

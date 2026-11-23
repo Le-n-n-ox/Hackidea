@@ -5,6 +5,7 @@ import itertools
 import json
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 from hackidea.stages.ideation import idea_similarity, SIMILARITY_THRESHOLD
 from hackidea.stages.scoring import weighted_total
 
@@ -81,8 +82,7 @@ def run(runner) -> dict:
     evidence = prompts.build_digest([s for s in source_rows if s.get("fetched")], 24)
 
     # One small red-team request per finalist, with fetched research included.
-    reviews = []
-    for c in finalists:
+    def review_one(c):
         system, user = prompts.redteam(ctx, [c], evidence)
         stage = f"redteam_{c['id']}"
         try:
@@ -110,48 +110,80 @@ def run(runner) -> dict:
             # A matching fetched URL is a research lead, not automatic proof that
             # the page supports the model's specific claim.
             risk["verification"] = "unverified; check the exact claim against the linked source"
-        reviews.append(review)
+        return review
+    review_outcomes = ordered_fanout(
+        finalists, review_one, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("adversarial red-team", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("red-team reviews cancelled")
+    reviews = [outcome.value if outcome.value is not None else _fallback_review(c["id"])
+               for c, outcome in zip(finalists, review_outcomes)]
     runner.save("redteam.json", {"reviews": reviews})
     runner.log(f"red-team: {len(reviews)}/{len(finalists)} finalists reviewed")
 
     # Every unordered pair is judged in both positions. Python binds the response
     # to the submitted pair; model-returned a/b labels are diagnostic only.
-    matches, pair_results = [], []
-    for pair_index, (first, second) in enumerate(itertools.combinations(finalists, 2), 1):
-        votes = []
-        for position, (a, b) in enumerate(((first, second), (second, first)), 1):
-            system, user = prompts.tournament(ctx, [(a, b)])
+    pairs = list(itertools.combinations(finalists, 2))
+    tasks = []
+    for pair_index, (first, second) in enumerate(pairs, 1):
+        tasks.append((pair_index, 1, first, second))
+        tasks.append((pair_index, 2, second, first))
+
+    def judge_ordered(task):
+        pair_index, position, a, b = task
+        system, user = prompts.tournament(ctx, [(a, b)])
+        try:
+            result = runner.llm.complete_json(system, user, schemas.TOURNAMENT_SCHEMA,
+                stage=f"tournament_{pair_index:02d}_{position}", max_tokens=1600)
+            emitted = result["matches"][0]
+            winner = emitted.get("winner")
+        except Exception as exc:
+            runner.log(f"  tournament response invalid for pair {pair_index}/{position}: {type(exc).__name__}")
+            emitted, winner = {}, None
+        if winner not in (a["id"], b["id"]):
+            user += (f"\nThe only valid winner ids are {a['id']} and {b['id']}. "
+                     "Return one corrected match for the pair exactly as shown.")
             try:
                 result = runner.llm.complete_json(system, user, schemas.TOURNAMENT_SCHEMA,
-                                                  stage=f"tournament_{pair_index:02d}_{position}", max_tokens=1600)
+                    stage=f"tournament_retry_{pair_index:02d}_{position}", max_tokens=1600)
                 emitted = result["matches"][0]
                 winner = emitted.get("winner")
             except Exception as exc:
-                runner.log(f"  tournament response invalid for pair {pair_index}/{position}: {type(exc).__name__}")
+                runner.log(f"  tournament retry invalid for pair {pair_index}/{position}: {type(exc).__name__}")
                 emitted, winner = {}, None
-            if winner not in (first["id"], second["id"]):
-                # Targeted correction before any deterministic fallback.
-                user += (f"\nThe only valid winner ids are {first['id']} and {second['id']}. "
-                         "Return one corrected match for the pair exactly as shown.")
-                try:
-                    result = runner.llm.complete_json(system, user, schemas.TOURNAMENT_SCHEMA,
-                                                      stage=f"tournament_retry_{pair_index:02d}_{position}", max_tokens=1600)
-                    emitted = result["matches"][0]
-                    winner = emitted.get("winner")
-                except Exception as exc:
-                    runner.log(f"  tournament retry invalid for pair {pair_index}/{position}: {type(exc).__name__}")
-                    emitted, winner = {}, None
-            if winner not in (first["id"], second["id"]):
-                winner = max((first["id"], second["id"]),
-                             key=lambda i: score_by_id[i]["weighted_total"])
-                reasoning = "Model returned an invalid id; resolved by the saved weighted score."
-            else:
-                reasoning = emitted.get("reasoning", "")
-            votes.append(winner)
-            matches.append({"pair_id": pair_index, "position": position,
-                            "a": a["id"], "b": b["id"], "winner": winner,
-                            "reasoning": reasoning,
-                            "model_ids": {"a": emitted.get("a"), "b": emitted.get("b")}})
+        if winner not in (a["id"], b["id"]):
+            winner = max((a["id"], b["id"]), key=lambda i: score_by_id[i]["weighted_total"])
+            reasoning = "Model returned an invalid id; resolved by the saved weighted score."
+        else:
+            reasoning = emitted.get("reasoning", "")
+        return {"pair_id": pair_index, "position": position, "a": a["id"], "b": b["id"],
+                "winner": winner, "reasoning": reasoning,
+                "model_ids": {"a": emitted.get("a"), "b": emitted.get("b")}}
+
+    match_outcomes = ordered_fanout(
+        tasks, judge_ordered, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("adversarial tournament", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("tournament cancelled")
+    matches = []
+    for task, outcome in zip(tasks, match_outcomes):
+        if outcome.value is not None:
+            matches.append(outcome.value)
+            continue
+        pair_index, position, a, b = task
+        winner = max((a["id"], b["id"]), key=lambda i: score_by_id[i]["weighted_total"])
+        matches.append({"pair_id": pair_index, "position": position,
+                        "a": a["id"], "b": b["id"], "winner": winner,
+                        "reasoning": "Tournament item failed; resolved by the saved weighted score.",
+                        "model_ids": {"a": None, "b": None}})
+    matches_by_pair = {i: [m for m in matches if m["pair_id"] == i]
+                       for i in range(1, len(pairs) + 1)}
+    pair_results = []
+    for pair_index, (first, second) in enumerate(pairs, 1):
+        pair_matches = sorted(matches_by_pair[pair_index], key=lambda m: m["position"])
+        votes = [m["winner"] for m in pair_matches]
 
         if votes[0] == votes[1]:
             pair_winner, resolution = votes[0], "both orderings agreed"

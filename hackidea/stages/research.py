@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 from hackidea.config import SOURCE_TYPES
 from hackidea.search import normalize_url
 
@@ -105,9 +105,14 @@ def run(runner) -> dict:
     seen: set[str] = set()
     hits: list[dict] = []
     workers = min(getattr(runner.cfg, "search_workers", 4), len(queries))
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        results_by_query = list(pool.map(lambda q: runner.search.search(q["query"], max_results=8), queries))
-    for i, (q, results) in enumerate(zip(queries, results_by_query)):
+    outcomes = ordered_fanout(
+        queries, lambda q: runner.search.search(q["query"], max_results=8), workers=workers,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("research search", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("research search cancelled")
+    for i, (q, outcome) in enumerate(zip(queries, outcomes)):
+        results = outcome.value or []
         added = 0
         for h in results:
             url = normalize_url(h.url)
@@ -145,12 +150,15 @@ def run(runner) -> dict:
     selected = {h["url"] for h in fetch_order}
     pages_by_url = {}
     if fetch_order:
-        # Network waits dominate this stage. Fetch a small bounded batch in parallel;
-        # executor.map preserves order and URLs were globally deduplicated above.
-        workers = min(6, len(fetch_order))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            pages = pool.map(lambda hit: runner.fetch(hit["url"]), fetch_order)
-            pages_by_url = {hit["url"]: page for hit, page in zip(fetch_order, pages)}
+        outcomes = ordered_fanout(
+            fetch_order, lambda hit: runner.fetch(hit["url"]),
+            workers=min(6, getattr(runner.cfg, "search_workers", 4), len(fetch_order)),
+            cancelled=lambda: runner.cancel_requested,
+            progress=lambda done, total: runner.item_progress("research fetch", done, total))
+        if runner.cancel_requested:
+            raise InterruptedError("research fetch cancelled")
+        pages_by_url = {hit["url"]: outcome.value for hit, outcome in zip(fetch_order, outcomes)
+                        if outcome.error is None and not outcome.cancelled}
     ordered_hits = fetch_order + [h for h in hits if h["url"] not in selected]
     for h in ordered_hits:
         pq = per_query.get(h["query"], 0)
@@ -171,20 +179,29 @@ def run(runner) -> dict:
     fetched = [s for s in sources if s["fetched"]]
     by_url = {s["url"]: s for s in sources}
     takeaway_started = time.perf_counter()
-    for i in range(0, len(fetched), 5):
-        batch = fetched[i:i + 5]
+    batches = [fetched[i:i + 5] for i in range(0, len(fetched), 5)]
+    def make_takeaway(batch):
         system, user = prompts.takeaways(batch)
-        try:
-            data = runner.llm.complete_json(system, user, TAKEAWAYS_SCHEMA,
-                                            stage="takeaways", max_tokens=4000)
+        return runner.llm.complete_json(system, user, TAKEAWAYS_SCHEMA,
+                                        stage="takeaways", max_tokens=4000)
+    takeaway_outcomes = ordered_fanout(
+        batches, make_takeaway, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("research takeaways", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("research takeaways cancelled")
+    for batch, outcome in zip(batches, takeaway_outcomes):
+        if outcome.error:
+            runner.log(f"  takeaway batch failed ({type(outcome.error).__name__}); using snippets")
+            continue
+        if outcome.value:
+            data = outcome.value
             for t in data["takeaways"]:
                 s = by_url.get(normalize_url(t["url"])) or by_url.get(t["url"])
                 if s:
                     s["takeaway"] = t["takeaway"][:300]
                     if not s["date"] and t.get("date_hint"):
                         s["date"] = t["date_hint"]
-        except Exception as e:  # noqa: BLE001 - takeaways are enrichment, not fatal
-            runner.log(f"  takeaway batch failed ({e}); using snippets")
     for s in sources:
         if not s["takeaway"]:
             s["takeaway"] = (s["snippet"] or s["title"])[:200]

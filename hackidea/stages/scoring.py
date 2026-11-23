@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 from hackidea.config import DEFAULT_WEIGHTS
 
 DIMENSIONS = list(DEFAULT_WEIGHTS)
@@ -88,33 +89,71 @@ def run(runner) -> dict:
     runner.log(f"weights: {weights}")
 
     # --- score in batches; totals/ranks computed deterministically ---
-    rows = []
-    for i in range(0, len(cands), 4):
-        batch = cands[i:i + 4]
+    batches = [cands[i:i + 4] for i in range(0, len(cands), 4)]
+    def score_batch(batch):
         system, user = prompts.scoring(ctx, batch, weights, digest)
-        data = runner.llm.complete_json(system, user, schemas.SCORES_SCHEMA,
-                                        stage="scoring", max_tokens=4000)
         by_id = {c["id"]: c for c in batch}
-        accepted = {s["id"]: s for s in data["scores"] if s.get("id") in by_id}
-        for missing_id in set(by_id) - set(accepted):
+        batch_failed = False
+        try:
+            data = runner.llm.complete_json(system, user, schemas.SCORES_SCHEMA,
+                                            stage="scoring", max_tokens=4000)
+            accepted = {s["id"]: s for s in data["scores"] if s.get("id") in by_id}
+        except Exception as exc:
+            runner.log(f"  scoring batch failed ({type(exc).__name__}); using neutral scores")
+            accepted = {}
+            batch_failed = True
+        for candidate in batch:
+            missing_id = candidate["id"]
+            if missing_id in accepted:
+                continue
+            if batch_failed:
+                continue
             retry_system, retry_user = prompts.scoring(ctx, [by_id[missing_id]], weights, digest)
-            retry = runner.llm.complete_json(retry_system, retry_user, schemas.SCORES_SCHEMA,
-                                             stage=f"scoring_retry_{missing_id}", max_tokens=1600)
-            matched = next((s for s in retry["scores"] if s.get("id") == missing_id), None)
-            if matched:
-                accepted[missing_id] = matched
+            try:
+                retry = runner.llm.complete_json(retry_system, retry_user, schemas.SCORES_SCHEMA,
+                                                 stage=f"scoring_retry_{missing_id}", max_tokens=1600)
+                matched = next((s for s in retry["scores"] if s.get("id") == missing_id), None)
+                if matched:
+                    accepted[missing_id] = matched
+            except Exception:
+                pass
         raw_values = [[float(s[d]) for d in DIMENSIONS] for s in accepted.values()]
         scale_fix = bool(raw_values) and max(max(row) for row in raw_values) <= 1.0 and max(max(row) for row in raw_values) > 0
         if scale_fix:
-            runner.log(f"  score batch {i // 4 + 1}: corrected model's 0..1 scale to 0..10")
-        for identity, s in accepted.items():
+            runner.log(f"  score batch {cands.index(batch[0]) // 4 + 1}: corrected model's 0..1 scale to 0..10")
+        batch_rows = []
+        for candidate in batch:
+            identity = candidate["id"]
+            s = accepted.get(identity)
+            if s is None:
+                s = {d: 5.0 for d in DIMENSIONS}
+                s["rationale"] = "Scoring call failed; neutral fallback score used."
             c = by_id[identity]
             scores = {d: float(s[d]) for d in DIMENSIONS}
             if scale_fix:
                 scores = {d: value * 10 for d, value in scores.items()}
-            rows.append({"id": c["id"], "name": c["name"], "scores": scores,
-                         "rationale": s.get("rationale", ""),
-                         "weighted_total": weighted_total(scores, weights)})
+            batch_rows.append({"id": c["id"], "name": c["name"], "scores": scores,
+                               "rationale": s.get("rationale", ""),
+                               "weighted_total": weighted_total(scores, weights)})
+        return batch_rows
+
+    # Results are flattened in batch input order even when requests finish out of order.
+    batch_outcomes = ordered_fanout(
+        batches, score_batch, workers=runner.cfg.llm_concurrency,
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("scoring", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("scoring cancelled")
+    rows = []
+    for batch, outcome in zip(batches, batch_outcomes):
+        if outcome.value is not None:
+            rows.extend(outcome.value)
+        else:
+            for c in batch:
+                scores = {d: 5.0 for d in DIMENSIONS}
+                rows.append({"id": c["id"], "name": c["name"], "scores": scores,
+                             "rationale": "Scoring item failed; neutral fallback score used.",
+                             "weighted_total": weighted_total(scores, weights)})
     missing = kept_ids - {r["id"] for r in rows}
     if missing:
         runner.log(f"  WARNING: no scores returned for {sorted(missing)}")

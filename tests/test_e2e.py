@@ -232,5 +232,7 @@ def test_end_to_end(tmp_path, scripts):
     assert len(state["stage_runs"]) == 8
     assert all(row["status"] == "completed" for row in state["stage_runs"])
     assert all(row["seconds"] >= 0 and row["llm_requests"] >= 0 for row in state["stage_runs"])
+    assert all(row["llm_call_seconds"] >= 0 and row["llm_rate_limits"] >= 0
+               and row["search_deadline_cutoffs"] >= 0 for row in state["stage_runs"])
     for n in range(1, 15):
         assert f"## {n}." in report, f"missing section {n}"

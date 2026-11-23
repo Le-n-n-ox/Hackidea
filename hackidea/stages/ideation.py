@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 
 _STOP = {"the", "and", "for", "with", "from", "that", "this", "into", "using", "via",
          "ai", "agent", "agents", "voice", "chat", "powered", "based", "real", "time",
@@ -55,8 +56,13 @@ def run(runner) -> dict:
     sources = runner.load("research_log.json")["sources"]
     evidence = [s for s in sources if s.get("relevant") and s.get("fetched") and s.get("source_type") in
                 ("user_problems", "market_products", "local_context", "news_launches")]
+    # Keep ideation available when a search provider returns no pages from the
+    # preferred pain-point categories. Still require a fetched, theme-relevant
+    # source; never seed from an irrelevant page or an unfetched result.
     if not evidence:
-        raise RuntimeError("ideation needs at least one fetched, theme-relevant user-problem or market page")
+        evidence = [s for s in sources if s.get("relevant") and s.get("fetched")]
+    if not evidence:
+        raise RuntimeError("ideation needs at least one fetched, theme-relevant evidence page")
     problem_rows = runner.load("problems.json").get("problems", []) if (runner.run_dir / "problems.json").exists() else []
     source_by_url = {s["url"]: s for s in sources}
     problem_seeds = [(p, source_by_url[p["evidence_url"]]) for p in problem_rows
@@ -65,80 +71,111 @@ def run(runner) -> dict:
     angles = prompts.ANGLE_LIST
     counts = [n // len(angles) + (1 if i < n % len(angles) else 0)
               for i in range(len(angles))]
+    slot_angles = {}
+    slot = 0
+    for angle, count in zip(angles, counts):
+        for _ in range(count):
+            slot += 1
+            slot_angles[slot] = angle
     progress_path = runner.run_dir / "ideation_progress.json"
     if progress_path.exists():
         progress = runner.load("ideation_progress.json")
         candidates = progress.get("candidates", [])
         completed_slots = set(progress.get("completed_slots", []))
-        runner.log(f"ideation: resuming with {len(candidates)} candidates; "
-                   f"{len(completed_slots)} slots complete")
+        slot_attempts = {int(k): int(v) for k, v in progress.get("slot_attempts", {}).items()}
+        pending_slots = list(progress.get("pending_slots", [s for s in slot_angles if s not in completed_slots]))
+        rejected = progress.get("rejected", [])
+        runner.log(f"ideation: resuming with {len(candidates)} candidates; {len(completed_slots)} slots complete")
     else:
-        candidates = []
-        completed_slots: set[int] = set()
-    rejected: list[dict] = []
-    slot = 0
-    for angle, count in zip(angles, counts):
-        for _ in range(count):
-            slot += 1
-            if slot in completed_slots:
+        candidates, completed_slots, slot_attempts, rejected = [], set(), {}, []
+        pending_slots = list(slot_angles)
+
+    def persist_progress():
+        runner.save("ideation_progress.json", {
+            "candidates": candidates,
+            "completed_slots": sorted(completed_slots),
+            "slot_attempts": {str(k): v for k, v in sorted(slot_attempts.items())},
+            "pending_slots": list(pending_slots),
+            "rejected": rejected[-24:],
+        })
+
+    while pending_slots:
+        round_slots = list(pending_slots)
+        accepted_before = candidates[-8:].copy()
+        rejected_before = rejected[-6:].copy()
+        round_rows = [(s, slot_attempts.get(s, 0) + 1, accepted_before, rejected_before)
+                      for s in round_slots]
+
+        def generate(row):
+            slot_id, attempt, accepted_snapshot, rejected_snapshot = row
+            angle = slot_angles[slot_id]
+            if problem_seeds:
+                problem, seed = problem_seeds[(slot_id + attempt - 2) % len(problem_seeds)]
+            else:
+                problem, seed = None, evidence[(slot_id + attempt - 2) % len(evidence)]
+            system, user = prompts.ideation_one(ctx, angle, seed, accepted_snapshot + rejected_snapshot)
+            if problem:
+                user += (f"\n\nDistinct problem seed (avoid reusing the same user/task as another idea): "
+                         f"{problem['who']} needs to {problem['task']}. Source: {problem['evidence_url']}")
+            if attempt > 1 and rejected_snapshot:
+                last = rejected_snapshot[-1]
+                user += (f"\nYour previous candidate was rejected as a near-duplicate: "
+                         f"{last.get('name')} — {last.get('problem')}. Change the user, task, and AI mechanism.")
+            data = runner.llm.complete_json(system, user, schemas.CANDIDATES_SCHEMA,
+                stage=f"ideation_{slot_id:02d}_try{attempt}", max_tokens=1800, tries=1,
+                temperature=0.9 if attempt > 1 else 0.8, seed=slot_id * 10 + attempt)
+            return dict(data["candidates"][0]), seed
+
+        outcomes = ordered_fanout(
+            round_rows, generate, workers=runner.cfg.llm_concurrency,
+            cancelled=lambda: runner.cancel_requested,
+            progress=lambda done, total: runner.item_progress("ideation", done, total))
+        next_pending = []
+        for i, (row, outcome) in enumerate(zip(round_rows, outcomes)):
+            slot_id, attempt, _, _ = row
+            if outcome.cancelled:
+                next_pending.append(slot_id)
+                pending_slots = next_pending + round_slots[i + 1:]
+                persist_progress()
                 continue
-            accepted = False
-            for attempt in range(1, 4):
-                # A duplicate retry changes both the source seed and sampling seed,
-                # so the model has a concrete path out of its previous answer.
-                if problem_seeds:
-                    problem, seed = problem_seeds[(slot + attempt - 2) % len(problem_seeds)]
-                else:
-                    problem, seed = None, evidence[(slot + attempt - 2) % len(evidence)]
-                system, user = prompts.ideation_one(ctx, angle, seed,
-                                                     candidates[-8:] + rejected[-6:])
-                if problem:
-                    user += (f"\n\nDistinct problem seed (avoid reusing the same user/task as another idea): "
-                             f"{problem['who']} needs to {problem['task']}. Source: {problem['evidence_url']}")
-                if attempt > 1 and rejected:
-                    last = rejected[-1]
-                    user += (f"\nYour previous candidate was rejected as a near-duplicate: "
-                             f"{last.get('name')} — {last.get('problem')}. Change the user, task, and AI mechanism.")
-                stage = f"ideation_{slot:02d}_try{attempt}"
-                try:
-                    data = runner.llm.complete_json(system, user, schemas.CANDIDATES_SCHEMA,
-                                                    stage=stage, max_tokens=1800, tries=1,
-                                                    temperature=0.9 if attempt > 1 else 0.8,
-                                                    seed=slot * 10 + attempt)
-                except Exception as exc:
-                    runner.log(f"  malformed candidate for {angle!r}; retry {attempt}/3")
-                    rejected.append({"name": "malformed response",
-                                     "problem": "Previous response did not match the candidate JSON schema",
-                                     "target_user": "", "ai_core": ""})
-                    continue
-                candidate = dict(data["candidates"][0])
-                candidate["id"] = f"c{len(candidates)+1:02d}"
+            angle = slot_angles[slot_id]
+            slot_attempts[slot_id] = attempt
+            candidate = None
+            if outcome.value is None:
+                rejected.append({"name": "malformed response", "problem": "No valid candidate response",
+                                 "target_user": "", "ai_core": ""})
+                runner.log(f"  candidate generation failed for slot {slot_id}: {type(outcome.error).__name__}")
+            else:
+                candidate, seed = outcome.value
                 candidate["model_angle"] = candidate.get("angle", "")
                 if not _angle_matches(angle, candidate):
-                    runner.log(f"  candidate ignored assigned angle {angle!r}; retry {attempt}/3")
+                    runner.log(f"  candidate ignored assigned angle {angle!r}; refill round {attempt}/3")
                     rejected.append(candidate)
-                    continue
-                candidate["angle"] = angle
-                # The source identity is assigned from the fetched research record.
-                candidate["evidence_url"] = seed["url"]
-                candidate["evidence_title"] = seed.get("title", "")
-                if any(idea_similarity(candidate, old) >= SIMILARITY_THRESHOLD for old in candidates):
-                    runner.log(f"  duplicate result for angle {angle!r}; retry {attempt}/3")
-                    rejected.append(candidate)
-                    continue
+                    candidate = None
+                else:
+                    candidate["angle"] = angle
+                    candidate["evidence_url"] = seed["url"]
+                    candidate["evidence_title"] = seed.get("title", "")
+                    if any(idea_similarity(candidate, old) >= SIMILARITY_THRESHOLD for old in candidates):
+                        runner.log(f"  duplicate result for angle {angle!r}; refill round {attempt}/3")
+                        rejected.append(candidate)
+                        candidate = None
+            if candidate is not None:
+                candidate["id"] = f"c{len(candidates)+1:02d}"
                 candidates.append(candidate)
-                accepted = True
-                break
-            if not accepted:
+                completed_slots.add(slot_id)
+            elif attempt < 3:
+                next_pending.append(slot_id)
+            else:
+                completed_slots.add(slot_id)
                 runner.log(f"  no distinct candidate found for angle {angle!r}")
-            completed_slots.add(slot)
-            runner.save("ideation_progress.json", {
-                "candidates": candidates,
-                "completed_slots": sorted(completed_slots),
-            })
-            runner.log(f"ideation progress: {len(candidates)}/{n} candidates; "
-                       f"slot {slot}/{n} complete")
-
+            pending_slots = next_pending + round_slots[i + 1:]
+            persist_progress()
+            runner.log(f"ideation progress: {len(candidates)}/{n} candidates; slot {slot_id}/{n} considered")
+        pending_slots = next_pending
+        if runner.cancel_requested:
+            persist_progress()
+            raise InterruptedError("ideation cancelled")
     runner.save("candidates.json", {"candidates": candidates})
     runner.log(f"ideation: {len(candidates)} distinct candidates across angles "
                f"{sorted({c.get('angle', '?') for c in candidates})}")

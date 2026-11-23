@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from hackidea import prompts, schemas
+from hackidea.concurrency import ordered_fanout
 
 PARTS = [("a", prompts.blueprint_a), ("b", prompts.blueprint_b),
          ("c", prompts.blueprint_c), ("d", prompts.blueprint_d)]
@@ -40,18 +41,35 @@ def run(runner) -> dict:
               f"Mitigations: {json.dumps([x.get('mitigation') for x in rt.get('risks', [])][:5])}. "
               f"Stability: {stability['resolution']}")
 
-    parts = {}
-    for key, fn in PARTS:
+    def make_part(item):
+        key, fn = item
         system, user = fn(ctx, winner, detail, digest, build_config)
         user += f"\n[STAGE:blueprint_{key}]"
-        text = runner.llm.chat([{"role": "system", "content": system},
-                                {"role": "user", "content": user}],
-                               max_tokens=9000, temperature=0.5)
-        if len(text.strip()) < 500:
-            retry = user + "\nYour previous answer was too short. Write the FULL sections with all required detail."
+        try:
             text = runner.llm.chat([{"role": "system", "content": system},
-                                    {"role": "user", "content": retry}],
+                                    {"role": "user", "content": user}],
                                    max_tokens=9000, temperature=0.5)
+            if len(text.strip()) < 500:
+                retry = user + "\nYour previous answer was too short. Write the FULL sections with all required detail."
+                text = runner.llm.chat([{"role": "system", "content": system},
+                                        {"role": "user", "content": retry}],
+                                       max_tokens=9000, temperature=0.5)
+            return key, text
+        except Exception as exc:
+            runner.log(f"  blueprint part {key} failed ({type(exc).__name__}); preserving report structure")
+            return key, f"## {dict(a=1,b=5,c=9,d=12)[key]}. (generation failed)\n\n_This section could not be generated; resume the blueprint stage to retry._"
+
+    outcomes = ordered_fanout(
+        PARTS, make_part, workers=min(runner.cfg.llm_concurrency, len(PARTS)),
+        cancelled=lambda: runner.cancel_requested,
+        progress=lambda done, total: runner.item_progress("blueprint", done, total))
+    if runner.cancel_requested:
+        raise InterruptedError("blueprint generation cancelled")
+    parts = {}
+    for outcome in outcomes:
+        if outcome.value is None:
+            continue
+        key, text = outcome.value
         parts[key] = text
         (runner.run_dir / f"blueprint_{key}.md").write_text(text, encoding="utf-8")
         runner.log(f"blueprint part {key}: {len(text)} chars")

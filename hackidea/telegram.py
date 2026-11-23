@@ -172,7 +172,10 @@ class TelegramBot:
         if command == "/status":
             active = self.state.get("active_run")
             interrupted = self.state.get("interrupted_run")
-            self.send(chat_id, f"Run stage: {active.get('stage', 'starting')}" if active else
+            current = (f"Run stage: {active.get('stage', 'starting')}"
+                       + (f" ({active['items_done']}/{active['items_total']} items)"
+                          if active.get("items_total") else "")) if active else None
+            self.send(chat_id, current if active else
                       (f"The previous run stopped during {interrupted.get('stage', 'unknown')} after a restart." if interrupted else "No run is active."))
             return
         if command == "/last":
@@ -311,6 +314,7 @@ class TelegramBot:
                 self.state.setdefault("active_run", {}).update(stage="context", run_dir=str(runner.run_dir))
                 self._save_state()
                 runner.progress_callback = self._stage_progress
+                runner.item_progress_callback = self._stage_progress
                 run_dir = runner.run(context_text=text, parsed_context=parsed)
             except InterruptedError:
                 self.send(chat_id, "Run cancelled at the stage boundary.")
@@ -366,10 +370,17 @@ class TelegramBot:
         except Exception as exc:
             self.send(chat_id, f"Alternative blueprint failed ({type(exc).__name__}).")
 
-    def _stage_progress(self, stage: str, number: int, total: int) -> None:
+    def _stage_progress(self, stage: str, number: int, total: int, within_stage: bool = False) -> None:
         active = self.state.setdefault("active_run", {})
-        active["stage"] = stage; self._save_state()
-        self.send(active["chat_id"], f"Completed stage {number}/{total}: {stage}.")
+        active["stage"] = stage
+        if within_stage:
+            active["items_done"] = number
+            active["items_total"] = total
+            self._save_state()
+        else:
+            active.pop("items_done", None); active.pop("items_total", None)
+            self._save_state()
+            self.send(active["chat_id"], f"Completed stage {number}/{total}: {stage}.")
 
     @staticmethod
     def _summary(run_dir: Path) -> str:

@@ -11,6 +11,7 @@ class FakeTelegram(TelegramBot):
     def __init__(self, tmp_path):
         super().__init__("fake", {7})
         self._state_path = tmp_path / "telegram.json"
+        self.state = {"drafts": {}, "last_update_id": -1}
         self.messages = []
         self.documents = []
 
