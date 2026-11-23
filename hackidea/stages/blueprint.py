@@ -72,7 +72,7 @@ def run(runner) -> dict:
     # Keep the historical blueprint artifact and part filenames for resume and
     # alternative-idea workflows; the Markdown files are rendered from JSON.
     parts = {
-        "a": ["summary", "frontend", "backend"],
+        "a": ["idea", "summary", "frontend", "backend"],
         "b": ["ai", "data"],
         "c": ["timeline"],
         "d": ["demo", "risks", "appendix"],

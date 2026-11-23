@@ -40,6 +40,37 @@ def _md_escape(value) -> str:
     return str(value or "").replace("\r", "").strip()
 
 
+def render_idea_section(winner: dict, idea: dict, heading: str = "### 1. The idea") -> str:
+    """Render the specific user action, AI work, and result from validated fields."""
+    return "\n".join([
+        f"{heading}: {winner.get('name', 'Winning idea')}", "",
+        f"**In plain language:** {idea['explanation']}", "",
+        f"**Example input:** {idea['example_input']}", "",
+        f"**What the user gets:** {idea['example_output']}", "",
+        f"**What the AI does:** {idea['ai_action']}", "",
+        f"**Build this much:** {idea['scope']}", "",
+        f"**For:** {winner.get('target_user', 'the intended user')}", "",
+    ])
+
+
+def replace_idea_section(markdown: str, winner: dict, idea: dict) -> str:
+    """Bring an older generated report's Idea section through the current renderer."""
+    patterns = (
+        r"(?ms)^## 1\. Idea[^\r\n]*\r?\n.*?(?=^## 2\.)",
+        r"(?ms)^### 1\. (?:Idea and user|The idea)[^\r\n]*\r?\n.*?(?=^### 2\.)",
+    )
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, markdown)
+        if match:
+            break
+    if not match:
+        raise ValueError("could not find the report's Idea section")
+    heading = "## 1. Idea" if match.group(0).startswith("## ") else "### 1. The idea"
+    replacement = render_idea_section(winner, idea, heading)
+    return markdown[:match.start()] + replacement + markdown[match.end():]
+
+
 def _architecture_svg() -> str:
     positions = {node["id"]: (20 + (index % 3) * 230, 24 + (index // 3) * 112)
                  for index, node in enumerate(ARCHITECTURE["nodes"])}
@@ -113,6 +144,7 @@ def build_final(runner) -> str:
     winner = next(c for c in runner.load("candidates.json")["candidates"]
                   if c["id"] == decision["winner_id"])
     files = code_files(content)
+    idea = content["idea"]
     summary = content["summary"]
     timeline = content["timeline"]["calendar"]
 
@@ -126,9 +158,7 @@ def build_final(runner) -> str:
                   f"**Plan:** {summary['risk_plan']}", "",
                   f"**Confidence: {summary['confidence_level'].title()}.** {summary['confidence_note']}",
                   summary["confidence_action"], "", "---", "", "## Build plan", "",
-                  "### 1. Idea and user", "",
-                  f"**Working hypothesis:** {winner.get('problem','')}", "",
-                  f"**User:** {winner.get('target_user','')}", "",
+                  *render_idea_section(winner, idea).splitlines(),
                   "### 2. Stack recommendations", "",
                   "| Part | Decision and reason |", "|---|---|"])
     for title, choice, reason in _stack_rows(config, docs):

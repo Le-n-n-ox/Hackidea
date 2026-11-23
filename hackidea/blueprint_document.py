@@ -1,4 +1,4 @@
-"""Validated structured content and code-enforced checks for the build document."""
+﻿"""Validated structured content and code-enforced checks for the build document."""
 from __future__ import annotations
 
 import html
@@ -34,6 +34,16 @@ def _list(item: dict, minimum: int = 1, maximum: int = 8) -> dict:
 
 
 BLUEPRINT_SECTIONS = {
+    "idea": {
+        "type": "object", "required": ["explanation", "example_input", "example_output", "ai_action", "scope"],
+        "properties": {
+            "explanation": _string(40, 420),
+            "example_input": _string(8, 180),
+            "example_output": _string(12, 260),
+            "ai_action": _string(20, 300),
+            "scope": _string(20, 260),
+        },
+    },
     "summary": {
         "type": "object", "required": ["pitch", "audience", "demo_steps", "reasons", "biggest_risk", "risk_plan", "confidence_note", "first_action"],
         "properties": {
@@ -144,17 +154,27 @@ def section_defaults(name: str, ctx: dict, winner: dict, team: list[str], event_
     title = winner.get("name", "the project")
     user = winner.get("target_user", "the intended user")
     duration = float(ctx.get("duration_hours") or 12)
+    if name == "idea":
+        pitch = str(winner.get("pitch") or winner.get("name") or "This project").strip()
+        return {
+            "explanation": pitch if len(pitch) >= 40 else f"{pitch} is designed for {user}.",
+            "example_input": f"A sample request from {user} about the problem described in this idea.",
+            "example_output": "The service returns the result described in the project pitch; verify the exact wording with a user.",
+            "ai_action": str(winner.get("ai_core") or "The AI handles the task described in the project pitch."),
+            "scope": "Build one end-to-end example of this specific idea, using its named user, input, and output.",
+        }
     if name == "summary":
-        return {"pitch": winner.get("pitch", f"Build {title} for {user}."), "audience": user,
-                "demo_steps": ["Enter a sample request in the small web screen.",
-                               "Show the saved data check and the generated response.",
-                               "Show the confirmation in the Africa's Talking simulator."],
-                "reasons": ["It connects a specific user workflow to the event theme.",
-                    "The AI extracts booking details while Python checks availability deterministically."],
-                "biggest_risk": "The target user may not have this exact coordination problem.",
-                "risk_plan": "Ask one local operator to walk through the sample before polishing the demo.",
+        pitch = winner.get("pitch", f"Build {title} for {user}.")
+        return {"pitch": pitch, "audience": user,
+                "demo_steps": ["Enter one sample request that matches the winning idea.",
+                               "Show the app's AI step working on that request.",
+                               "Show the specific result the intended user receives."],
+                "reasons": [f"It addresses the task described in the winning idea for {user}.",
+                    "One complete user request and response can be shown within the event time."],
+                "biggest_risk": "The intended user may not find this workflow useful.",
+                "risk_plan": "Ask one intended user or educator to try the example before adding features.",
                 "confidence_note": "Treat this as a promising testable idea, not a validated business case.",
-                "first_action": "Confirm the workflow with an operator, then create the Africa's Talking sandbox app."}
+                "first_action": "Check the example with an intended user, then build the smallest complete version."}
     if name == "frontend":
         return {"flow": "One phone-sized page accepts a booking request, shows the matched tour, and displays the SMS result.",
                 "screens": [{"name": "Booking desk", "purpose": "Submit a sample request and review the availability decision."},
@@ -212,6 +232,24 @@ def section_defaults(name: str, ctx: dict, winner: dict, team: list[str], event_
     if name == "appendix":
         return {"selection": f"The recorded selection process picked {title} because it was the top idea after comparing the finalists and reviewing their main risks. The choice is still a hypothesis: test the operator workflow before adding features."}
     raise KeyError(name)
+
+
+_GENERIC_IDEA_COPY = (
+    "prototype that reviews synthetic examples",
+    "flags cases for a person to review",
+    "does not access real accounts or take external actions",
+    "verify the supporting trend",
+)
+
+
+def enforce_idea(idea: dict, ctx: dict, winner: dict) -> dict:
+    """Reject boilerplate idea prose and fall back to the actual candidate record."""
+    normalized = json.loads(json.dumps(idea, ensure_ascii=False))
+    text = json.dumps(normalized, ensure_ascii=False).casefold()
+    if any(phrase in text for phrase in _GENERIC_IDEA_COPY):
+        normalized = section_defaults(
+            "idea", ctx, winner, team_aliases(ctx), event_date_from_context(ctx))
+    return normalized
 
 
 def _default_fixtures(event_date: str) -> list[dict]:
@@ -335,18 +373,14 @@ def enforce_document(content: dict, ctx: dict, winner: dict, runner_up: dict | N
     # Small models can return schema-shaped prose that conflicts with the selected
     # implementation. Fall back section-by-section when it contradicts the real
     # starter, the sponsor sandbox, or the fixed structured AI fields.
+    stale_summary = json.dumps(content["summary"], ensure_ascii=False).casefold()
+    if any(term in stale_summary for term in (
+            "prototype that reviews synthetic examples", "flags cases for a person to review",
+            "does not access real accounts or take external actions", "mock external apis", "mock/local fallback")):
+        content["summary"] = section_defaults("summary", ctx, winner, team, event_date)
+    content["idea"] = enforce_idea(content["idea"], ctx, winner)
     sponsor_sms = "africa's talking" in str(build_config(ctx, {}).get("sms", "")).casefold()
     if sponsor_sms:
-        stale_summary = json.dumps(content["summary"], ensure_ascii=False).casefold()
-        if any(term in stale_summary for term in ("mock api", "mock external", "mock/local", "sms/ussd", "via sms", "via ussd")):
-            content["summary"] = section_defaults("summary", ctx, winner, team, event_date)
-            content["summary"]["pitch"] = (
-                "Build a booking desk that checks tour availability and sends a confirmation through the sponsor simulator."
-            )
-            content["summary"]["reasons"] = [
-                "Gemini turns a plain booking request into fields; Python checks the available seats before confirming.",
-                "The sponsor simulator makes the confirmation visible in the event demo.",
-            ]
         stale_frontend = json.dumps(content["frontend"], ensure_ascii=False).casefold()
         if any(term in stale_frontend for term in ("mock", "simulat", "ussd")):
             content["frontend"] = section_defaults("frontend", ctx, winner, team, event_date)
@@ -399,13 +433,12 @@ def enforce_document(content: dict, ctx: dict, winner: dict, runner_up: dict | N
             "The operator problem has not been confirmed with direct local evidence; validate it before expanding the build."
         )
         content["summary"]["first_action"] = (
-            "Ask one local operator about the booking workflow, then create and test the Africa's Talking sandbox app."
-            if sponsor_sms else "Ask one intended user about the workflow, then test the smallest sample flow."
+            "Ask one intended user to try the example, then build the smallest complete version."
         )
     content["summary"]["confidence_action"] = (
         f"Runner-up: {content['summary']['runner_up_name']}. Use /alternatives to generate its blueprint."
         if content["summary"]["confidence_level"] == "low" and runner_up
-        else "Use the first hour to test the key workflow with an operator." if content["summary"]["confidence_level"] != "high"
+        else "Use the first hour to test the key workflow with an intended user." if content["summary"]["confidence_level"] != "high"
         else "Proceed with the one-flow prototype and keep the demo focused.")
     return content
 

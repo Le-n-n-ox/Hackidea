@@ -118,7 +118,7 @@ _BP_CTX = {"duration_hours": 48, "team": [{"role": "frontend", "skills": ["react
 BP = {f"blueprint_{section}":
       (lambda _text, section=section: section_defaults(
           section, _BP_CTX, _BP_WINNER, team_aliases(_BP_CTX), "2026-11-26"))
-      for section in ("summary", "frontend", "backend", "ai", "data", "timeline", "demo", "risks", "appendix")}
+      for section in ("idea", "summary", "frontend", "backend", "ai", "data", "timeline", "demo", "risks", "appendix")}
 
 
 @pytest.fixture()
@@ -223,7 +223,11 @@ def test_end_to_end(tmp_path, scripts):
     report = (run_dir / "final_report.md").read_text(encoding="utf-8")
     assert report.startswith("# ")
     assert report.count("## Decide in five minutes") == 1
-    assert report.count("## 1. Idea") == 1
+    assert report.count("### 1. The idea:") == 1
+    assert "**In plain language:**" in report
+    assert "**Example input:**" in report
+    assert "**What the AI does:**" in report
+    assert "prototype that reviews synthetic examples related to this idea" not in report.lower()
     assert "MilkLedger" in report
     assert "another candidate" not in report
     assert "## Sources" in report
@@ -268,7 +272,7 @@ def test_end_to_end(tmp_path, scripts):
     assert all(row["seconds"] >= 0 and row["llm_requests"] >= 0 for row in state["stage_runs"])
     assert all(row["llm_call_seconds"] >= 0 and row["llm_rate_limits"] >= 0
                and row["search_deadline_cutoffs"] >= 0 for row in state["stage_runs"])
-    assert "### 1. Idea and user" in report
+    assert "### 1. The idea:" in report
     assert "### 2. Stack recommendations" in report
     assert "### 10. Risks" in report
     content = json.loads((run_dir / "blueprint_content.json").read_text(encoding="utf-8"))

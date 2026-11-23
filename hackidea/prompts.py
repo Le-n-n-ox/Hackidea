@@ -340,7 +340,8 @@ key_assumption, why_beats_others[{{point, evidence_url?}}], rationale."""
 # Structured, single-job blueprint prompts. The Python renderer controls layout,
 # references, examples, the calendar, owner names, and all external-fact wording.
 _BLUEPRINT_GUIDANCE = {
-    "summary": "Write the decision page: one concise pitch, intended user, exactly three demo steps, two or three plain reasons, one biggest risk and response, confidence advice, and the first action. Keep every string brief for a phone screen.",
+    "idea": "Explain the winning idea so a non-technical participant immediately understands it. Say what the named user does, what the product does with that input, and what the user gets back. Include one plausible, clearly illustrative input and output. Use ordinary words and the winning idea's actual domain. Do not describe generic synthetic-record review, flagging, or safety boundaries unless those are the idea. Do not copy the pitch verbatim, repeat generic demo-scope text, add features, or repeat a numeric problem claim unless relevant fetched evidence supports it.",
+    "summary": "Write the decision page: one concise pitch that tells a non-technical reader what the named user does and what they receive, exactly three demo steps, two or three plain reasons, one biggest risk and response, confidence advice, and the first action. Keep every string brief for a phone screen.",
     "frontend": "Plan the smallest useful phone-sized web screen for this exact idea. Return a short UI flow, 2-5 named screens/components, and 3-5 concrete visual polish actions.",
     "backend": "Describe the app-owned API routes, files, request flow, and error behavior for a 12-hour prototype. Keep payloads implementable. Python inserts researched third-party integration facts separately.",
     "ai": "Describe one narrow AI task and give the actual compact prompt. Python owns availability and confirmation decisions. Give JSON fields, three evaluation cases, and a manual fallback. Do not state vendor pricing, quotas, or rate limits.",
@@ -371,13 +372,12 @@ def blueprint_section(ctx: dict, winner: dict, section: str, build_config: dict,
               "Write concise, executable advice. You may recommend app-owned choices without citations. Never invent factual "
               "claims about vendor prices, quotas, rate limits, features, laws, or competitors. Python inserts factual claims "
               "only from fetched documentation. Do not write Markdown, tables, generic caveats, or repeated pitch text.")
-    blueprint_winner = dict(winner)
-    blueprint_winner["demo_scope"] = (
-        "Use the Africa's Talking official SMS sandbox and simulator for the demo. Do not mock SMS or USSD. "
-        "Use synthetic tour fixtures; never use production recipients or real transactions."
-        if "africa's talking" in str(build_config.get("sms", "")).casefold()
-        else "Use an event sponsor's official sandbox when available; stub only production accounts the team cannot access in time."
-    )
+    # Old runs may carry the previous filtering stage's generic demo_scope.
+    # It is useful for feasibility scoring, but it is not an explanation of the idea.
+    blueprint_winner = {key: value for key, value in winner.items() if key != "demo_scope"}
+    stack_context = ("Do not replace or reinterpret the winning product idea."
+                     if section in {"idea", "summary"}
+                     else json.dumps(choices, ensure_ascii=False))
     user = f"""SECTION JOB: {_BLUEPRINT_GUIDANCE[section]}
 
 HACKATHON:
@@ -387,7 +387,7 @@ WINNING IDEA:
 {candidate_block(blueprint_winner)}
 
 FIXED STACK (use consistently; do not introduce another vendor):
-{json.dumps(choices, ensure_ascii=False)}
+{stack_context}
 
 RUNNER-UP: {(runner_up or {}).get('name', '(not recorded)')}
 

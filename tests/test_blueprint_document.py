@@ -7,13 +7,15 @@ from hackidea.blueprint_document import (
     ARCHITECTURE,
     BLUEPRINT_SECTIONS,
     enforce_document,
+    enforce_idea,
     event_date_from_context,
     section_defaults,
     team_aliases,
     validate_timeline,
 )
-from hackidea.report import _architecture_svg
+from hackidea.report import _architecture_svg, replace_idea_section
 from hackidea import schemas
+from hackidea.prompts import blueprint_section
 
 
 @pytest.fixture
@@ -75,3 +77,53 @@ def test_model_latex_arrows_are_normalized(document_parts):
                              winner, None, {"confidence_level": "medium"})
     assert "\\rightarrow" not in fixed["timeline"]["calendar"][0]["task"]
     assert re.search(r"Parse request to check seats", fixed["timeline"]["calendar"][0]["task"])
+
+
+def test_idea_default_uses_the_winning_candidate_instead_of_generic_safety_copy(document_parts):
+    ctx, winner, content = document_parts
+    content["idea"] = {
+        "explanation": "A prototype that reviews synthetic examples related to this idea and flags cases for a person to review; it does not access real accounts or take external actions.",
+        "example_input": "A synthetic example.", "example_output": "A person reviews a flag.",
+        "ai_action": "Provide an advisory explanation.", "scope": "Use synthetic examples.",
+    }
+    fixed = enforce_document(content, ctx, winner, None, {"confidence_level": "medium"})
+    assert winner["pitch"] in fixed["idea"]["explanation"]
+    assert "flags cases for a person to review" not in fixed["idea"]["explanation"]
+
+
+def test_blueprint_idea_prompt_omits_stale_demo_scope_and_preserves_domain():
+    winner = {
+        "id": "c10", "name": "Local Language Concept Explainer via SMS",
+        "pitch": "An AI tutor explains STEM concepts in simple Kiswahili by SMS.",
+        "problem": "Learners may struggle with complex STEM wording.",
+        "target_user": "Working women in Nairobi studying STEM",
+        "ai_core": "Rewrite a short concept note in plain Kiswahili.",
+        "demo_scope": "A prototype that reviews synthetic examples and flags cases for a person to review.",
+    }
+    ctx = {"theme": "Edtech Solutions", "duration_hours": 11,
+           "sponsors": ["Africa's Talking"], "team": []}
+    stack = {key: "unused" for key in ("frontend", "backend", "database", "primary_ai", "sms", "hosting")}
+    _, prompt = blueprint_section(ctx, winner, "idea", stack, [], None)
+    assert winner["pitch"] in prompt
+    assert "A prototype that reviews synthetic examples" not in prompt
+    assert "synthetic tour fixtures" not in prompt
+    assert "what the named user does" in prompt
+
+
+def test_older_idea_section_can_be_regenerated_from_structured_content(document_parts):
+    ctx, winner, _ = document_parts
+    winner = {**winner, "name": "Local Language Concept Explainer via SMS",
+              "target_user": "working women in Nairobi studying STEM"}
+    idea = {"explanation": "A learner texts a STEM topic and gets a short explanation in Kiswahili.",
+            "example_input": "EXPLAIN PHOTOSYNTHESIS SW",
+            "example_output": "Plants use sunlight and water to make food.",
+            "ai_action": "The AI rewrites a reviewed concept note in simpler words.",
+            "scope": "Demo five educator-reviewed topics through the SMS sandbox."}
+    legacy = ("## 1. Idea\nName: Local Language Concept Explainer\n"
+              "Pitch: A prototype that reviews synthetic examples and flags cases.\n\n"
+              "## 2. Why it wins\nThe existing report continues here.\n")
+    updated = replace_idea_section(legacy, winner, idea)
+    assert "A learner texts a STEM topic" in updated
+    assert "**Example input:** EXPLAIN PHOTOSYNTHESIS SW" in updated
+    assert "prototype that reviews synthetic examples" not in updated.lower()
+    assert "## 2. Why it wins" in updated
