@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,5 +35,13 @@ class DiskCache:
 
     def set(self, kind: str, key: str, value: Any) -> None:
         p = self._path(kind, key)
-        p.write_text(json.dumps({"ts": time.time(), "value": value}, ensure_ascii=False),
-                     encoding="utf-8")
+        tmp = p.with_name(f"{p.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps({"ts": time.time(), "value": value}, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, p)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

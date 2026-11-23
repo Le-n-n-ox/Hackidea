@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import requests
@@ -13,6 +16,13 @@ from hackidea import schemas
 
 class LLMError(RuntimeError):
     pass
+
+
+class ProviderResponseError(LLMError):
+    def __init__(self, status: int, retry_after: float, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.retry_after = retry_after
 
 
 def extract_json(text: str) -> Any:
@@ -71,8 +81,85 @@ def extract_json(text: str) -> Any:
 class BaseLLM:
     """Shared JSON-with-validation-and-retry loop on top of chat()."""
 
+    def __init__(self, concurrency: int = 4):
+        self._request_gate = threading.BoundedSemaphore(max(1, concurrency))
+        self._rate_condition = threading.Condition()
+        self._pause_until = 0.0
+        self._stats_lock = threading.Lock()
+        self.request_count = 0
+        self._stage_metrics: dict[str, dict[str, float | int]] = {}
+        self.current_stage = "unknown"
+
+    def set_current_stage(self, stage: str):
+        with self._stats_lock:
+            self.current_stage = stage
+
+    def metrics_snapshot(self, stage: str | None = None) -> dict:
+        with self._stats_lock:
+            if stage is not None:
+                row = dict(self._stage_metrics.get(stage, {}))
+                return {"calls": int(row.get("calls", 0)),
+                        "call_seconds": float(row.get("call_seconds", 0.0)),
+                        "rate_limits": int(row.get("rate_limits", 0))}
+            return {k: dict(v) for k, v in self._stage_metrics.items()}
+
+    def _record(self, stage: str, field: str, value):
+        with self._stats_lock:
+            row = self._stage_metrics.setdefault(stage, {"calls": 0, "call_seconds": 0.0, "rate_limits": 0})
+            row[field] += value
+
     def chat(self, messages: list[dict], max_tokens: int | None = None,
-             temperature: float = 0.7, seed: int | None = None) -> str:
+             temperature: float = 0.7, seed: int | None = None, **kwargs) -> str:
+        """Bound provider requests globally and coordinate Retry-After pauses."""
+        stage = self.current_stage
+        retries = max(0, int(getattr(getattr(self, "cfg", None), "llm_max_retries", 3)))
+        transient_attempt = 0
+        while True:
+            with self._request_gate:
+                with self._rate_condition:
+                    remaining = self._pause_until - time.monotonic()
+                    while remaining > 0:
+                        self._rate_condition.wait(remaining)
+                        remaining = self._pause_until - time.monotonic()
+                started = time.perf_counter()
+                with self._stats_lock:
+                    self.request_count += 1
+                    self._stage_metrics.setdefault(stage, {"calls": 0, "call_seconds": 0.0, "rate_limits": 0})
+                    self._stage_metrics[stage]["calls"] += 1
+                try:
+                    result = self._chat(messages, max_tokens=max_tokens,
+                                        temperature=temperature, seed=seed, **kwargs)
+                except ProviderResponseError as exc:
+                    elapsed = time.perf_counter() - started
+                    self._record(stage, "call_seconds", elapsed)
+                    if exc.status == 429:
+                        self._record(stage, "rate_limits", 1)
+                        pause = max(0.0, exc.retry_after)
+                        with self._rate_condition:
+                            self._pause_until = max(self._pause_until, time.monotonic() + pause)
+                            self._rate_condition.notify_all()
+                    else:
+                        time.sleep(max(0.0, exc.retry_after))
+                    transient_attempt += 1
+                    if transient_attempt > retries:
+                        raise
+                    continue
+                except requests.RequestException as exc:
+                    self._record(stage, "call_seconds", time.perf_counter() - started)
+                    transient_attempt += 1
+                    if transient_attempt > retries:
+                        raise LLMError(f"LLM call failed after retries: {type(exc).__name__}: {exc}") from exc
+                    time.sleep(min(2 ** (transient_attempt - 1) * 3, 60))
+                    continue
+                except BaseException:
+                    self._record(stage, "call_seconds", time.perf_counter() - started)
+                    raise
+                else:
+                    self._record(stage, "call_seconds", time.perf_counter() - started)
+                    return result
+
+    def _chat(self, messages: list[dict], max_tokens: int | None = None,
+              temperature: float = 0.7, seed: int | None = None, **kwargs) -> str:
         raise NotImplementedError
 
     def complete_json(self, system: str, user: str, schema: dict, *,
@@ -125,9 +212,9 @@ class OpenAICompatLLM(BaseLLM):
     via `hermes proxy`, Ollama, vLLM, etc. Provider swap = env vars only."""
 
     def __init__(self, cfg):
+        super().__init__(cfg.llm_concurrency)
         self.cfg = cfg
-        self.session = requests.Session()
-        self.request_count = 0
+        self._sessions = threading.local()
         self.uses_mistral_large_4 = (
             cfg.llm_base_url.startswith("https://integrate.api.nvidia.com")
             and cfg.llm_model == "mistralai/mistral-large-4-1t-a52b"
@@ -140,7 +227,14 @@ class OpenAICompatLLM(BaseLLM):
         self.supports_json_mode = cfg.llm_structured_output in ("json_schema", "json_object")
         self.needs_reasoning_headroom = self.uses_mistral_large_4
 
-    def chat(self, messages: list[dict], max_tokens: int | None = None,
+    def _session(self):
+        session = getattr(self._sessions, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._sessions.session = session
+        return session
+
+    def _chat(self, messages: list[dict], max_tokens: int | None = None,
              temperature: float = 0.7, seed: int | None = None,
              response_format: dict | None = None) -> str:
         payload: dict[str, Any] = {
@@ -167,43 +261,43 @@ class OpenAICompatLLM(BaseLLM):
         url = f"{self.cfg.llm_base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.cfg.llm_api_key or 'local'}",
                    "Content-Type": "application/json"}
-        last_err: Exception | None = None
-        for attempt in range(self.cfg.llm_max_retries + 1):
+        resp = self._session().post(url, json=payload, headers=headers,
+                                    timeout=self.cfg.llm_timeout)
+        if resp.status_code == 429 or resp.status_code in (500, 502, 503, 504):
+            raw_retry = resp.headers.get("Retry-After", "")
             try:
-                self.request_count += 1
-                resp = self.session.post(url, json=payload, headers=headers,
-                                         timeout=self.cfg.llm_timeout)
-                if resp.status_code in (429, 500, 502, 503, 504):
-                    wait = float(resp.headers.get("Retry-After", 0)) or min(2 ** attempt * 3, 60)
-                    last_err = LLMError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-                    time.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"].get("content") or ""
-                if not content.strip():
-                    raise LLMError("empty content in LLM response")
-                return content
-            except (requests.RequestException, LLMError, KeyError, ValueError) as e:
-                last_err = e
-                if attempt < self.cfg.llm_max_retries:
-                    time.sleep(min(2 ** attempt * 3, 60))
-        raise LLMError(f"LLM call failed after retries: {last_err}")
+                retry_after = float(raw_retry)
+            except (TypeError, ValueError):
+                try:
+                    retry_after = max(0.0, (parsedate_to_datetime(raw_retry) - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = 3.0
+            detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            raise ProviderResponseError(resp.status_code, min(retry_after, 60), detail)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"].get("content") or ""
+        if not content.strip():
+            raise LLMError("empty content in LLM response")
+        return content
 
 
 class MockLLM(BaseLLM):
     """Scripted LLM for tests. Responses keyed by the [STAGE:name] marker."""
 
-    def __init__(self, scripts: dict[str, Any], default: Any = None):
+    def __init__(self, scripts: dict[str, Any], default: Any = None, *, concurrency: int = 4):
+        super().__init__(concurrency)
         self.scripts = scripts
         self.default = default
         self.calls: list[str] = []
+        self._calls_lock = threading.Lock()
 
     def _pick(self, messages: list[dict]) -> str:
         text = "\n".join(m.get("content", "") for m in messages)
         m = re.findall(r"\[STAGE:(\w+)\]", text)
         stage = m[-1] if m else ""
-        self.calls.append(stage)
+        with self._calls_lock:
+            self.calls.append(stage)
         val = self.scripts.get(stage, self.default)
         if val is None:
             raise LLMError(f"MockLLM has no script for stage {stage!r}")
@@ -211,8 +305,8 @@ class MockLLM(BaseLLM):
             val = val(text)
         return val if isinstance(val, str) else json.dumps(val)
 
-    def chat(self, messages, max_tokens=None, temperature=0.7, seed=None,
-             response_format=None):
+    def _chat(self, messages, max_tokens=None, temperature=0.7, seed=None,
+              response_format=None):
         return self._pick(messages)
 
 

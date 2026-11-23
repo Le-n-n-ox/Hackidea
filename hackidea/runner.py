@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -28,7 +29,10 @@ class Runner:
         self.ask = ask or input
         self.ctx: dict = {}
         self.progress_callback = None
+        self.item_progress_callback = None
         self.cancel_requested = False
+        self.current_stage = "unknown"
+        self._log_lock = threading.Lock()
 
     # ---- artifacts ----
     def new_run(self) -> Path:
@@ -56,7 +60,12 @@ class Runner:
         return json.loads(p.read_text(encoding="utf-8"))
 
     def log(self, msg: str) -> None:
-        print(f"[hackidea] {msg}", file=sys.stderr, flush=True)
+        with self._log_lock:
+            print(f"[hackidea] {msg}", file=sys.stderr, flush=True)
+
+    def item_progress(self, stage: str, done: int, total: int) -> None:
+        if self.item_progress_callback:
+            self.item_progress_callback(stage, done, total, True)
 
     def llm_request_count(self) -> int:
         return int(getattr(self.llm, "request_count", len(getattr(self.llm, "calls", []))))
@@ -107,22 +116,36 @@ class Runner:
             if name == "context" and not context_text and not self.ctx:
                 raise SystemExit("no context: pass --context or --resume a run dir")
             self.log(f"=== stage {i+1}/8: {name} ===")
+            self.current_stage = name
+            if hasattr(self.llm, "set_current_stage"):
+                self.llm.set_current_stage(name)
+            if hasattr(self.search, "set_current_stage"):
+                self.search.set_current_stage(name)
             t0 = time.time()
             calls_before = self.llm_request_count()
+            llm_metrics_before = self.llm.metrics_snapshot(name) if hasattr(self.llm, "metrics_snapshot") else {}
+            search_metrics_before = self.search.metrics_snapshot(name) if hasattr(self.search, "metrics_snapshot") else {}
             try:
                 handlers[name]()
             except BaseException as exc:
                 calls_this_stage = self.llm_request_count() - calls_before
                 seconds = round(time.time() - t0, 1)
+                llm_metrics_after = self.llm.metrics_snapshot(name) if hasattr(self.llm, "metrics_snapshot") else {}
+                search_metrics_after = self.search.metrics_snapshot(name) if hasattr(self.search, "metrics_snapshot") else {}
                 state["last_stage_seconds"] = seconds
                 state["llm_requests_last_stage"] = calls_this_stage
                 state["llm_requests_total"] = state.get("llm_requests_total", 0) + calls_this_stage
                 state["stage_runs"].append({"stage": name, "seconds": seconds,
                                             "llm_requests": calls_this_stage,
+                                            "llm_call_seconds": round(llm_metrics_after.get("call_seconds", 0.0) - llm_metrics_before.get("call_seconds", 0.0), 3),
+                                            "llm_rate_limits": llm_metrics_after.get("rate_limits", 0) - llm_metrics_before.get("rate_limits", 0),
+                                            "search_deadline_cutoffs": search_metrics_after.get("deadline_cutoffs", 0) - search_metrics_before.get("deadline_cutoffs", 0),
                                             "status": "failed", "error": type(exc).__name__})
                 state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
                 raise
             calls_this_stage = self.llm_request_count() - calls_before
+            llm_metrics_after = self.llm.metrics_snapshot(name) if hasattr(self.llm, "metrics_snapshot") else {}
+            search_metrics_after = self.search.metrics_snapshot(name) if hasattr(self.search, "metrics_snapshot") else {}
             state["completed"] = [s for s in state["completed"] if s != name] + [name]
             state["last_stage_seconds"] = round(time.time() - t0, 1)
             state["llm_requests_last_stage"] = calls_this_stage
@@ -130,6 +153,9 @@ class Runner:
             state["stage_runs"].append({"stage": name,
                                         "seconds": state["last_stage_seconds"],
                                         "llm_requests": calls_this_stage,
+                                        "llm_call_seconds": round(llm_metrics_after.get("call_seconds", 0.0) - llm_metrics_before.get("call_seconds", 0.0), 3),
+                                        "llm_rate_limits": llm_metrics_after.get("rate_limits", 0) - llm_metrics_before.get("rate_limits", 0),
+                                        "search_deadline_cutoffs": search_metrics_after.get("deadline_cutoffs", 0) - search_metrics_before.get("deadline_cutoffs", 0),
                                         "status": "completed"})
             state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
             self.log(f"--- {name} done in {state['last_stage_seconds']}s")

@@ -65,6 +65,7 @@ class Config:
     llm_timeout: int = 300
     llm_max_retries: int = 3
     llm_max_tokens: int = 8000
+    llm_concurrency: int = 4
     llm_structured_output: str = "json_schema"
     search_provider: str = "ddgs"
     ddgs_backends: str = "google,duckduckgo,bing,mojeek"
@@ -95,6 +96,7 @@ class Config:
             llm_timeout=_int("LLM_TIMEOUT", 300),
             llm_max_retries=_int("LLM_MAX_RETRIES", 3),
             llm_max_tokens=_int("LLM_MAX_TOKENS", 8000),
+            llm_concurrency=max(1, _int("LLM_CONCURRENCY", 4)),
             llm_structured_output=structured,
             search_provider=os.environ.get("SEARCH_PROVIDER", "ddgs").lower(),
             ddgs_backends=os.environ.get("DDGS_BACKENDS", cls.ddgs_backends),
