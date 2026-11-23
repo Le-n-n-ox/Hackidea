@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -45,10 +46,20 @@ class TelegramBot:
     def __init__(self, token: str, allowed_user_ids: set[int]):
         self.token = token
         self.allowed_user_ids = allowed_user_ids
-        self.session = requests.Session()
+        self._sessions = threading.local()
+        self._run_lock = threading.Lock()
+        self._run_active = False
+
+    def _session(self) -> requests.Session:
+        """Keep requests sessions thread-local while a pipeline runs in the background."""
+        session = getattr(self._sessions, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._sessions.session = session
+        return session
 
     def api(self, method: str, **params):
-        response = self.session.post(
+        response = self._session().post(
             API_ROOT.format(token=self.token, method=method),
             json=params,
             timeout=35,
@@ -74,7 +85,7 @@ class TelegramBot:
     def send_document(self, chat_id: int, path: Path, caption: str = "") -> None:
         """Upload a local report as a Telegram document attachment."""
         with path.open("rb") as document:
-            response = self.session.post(
+            response = self._session().post(
                 API_ROOT.format(token=self.token, method="sendDocument"),
                 data={"chat_id": chat_id, "caption": caption},
                 files={"document": (path.name, document, "text/markdown")},
@@ -116,7 +127,12 @@ class TelegramBot:
             self.send(chat_id, f"Your Telegram user ID is {user_id}.")
             return
         if command == "/cancel":
-            self.send(chat_id, "There is no active run to cancel. A running pipeline must finish.")
+            with self._run_lock:
+                active = self._run_active
+            if active:
+                self.send(chat_id, "A run is in progress. It cannot be cancelled, but I’ll send the report when it finishes.")
+            else:
+                self.send(chat_id, "There is no active run to cancel.")
             return
         if not text:
             return
@@ -128,28 +144,58 @@ class TelegramBot:
             return
 
         cfg = Config.from_env()
-        self.send(chat_id, f"Got it. Starting the {cfg.depth} HackIdea run now. This can take several minutes; I’ll send the report when it’s ready.")
-        try:
-            run_dir = Runner(cfg).run(context_text=text)
-        except (Exception, SystemExit) as exc:  # Keep the polling process alive after a failed run.
-            print(f"[hackidea-telegram] run failed ({type(exc).__name__})", file=sys.stderr, flush=True)
-            self.send(chat_id, f"The run failed. {safe_failure_hint(exc)}")
+        with self._run_lock:
+            active = self._run_active
+            if not active:
+                self._run_active = True
+        if active:
+            self.send(chat_id, "A HackIdea run is already in progress. I’ll send its report before starting another.")
             return
+        try:
+            self.send(chat_id, f"Got it. Starting the {cfg.depth} HackIdea run now. This can take several minutes; I’ll send the report when it’s ready.")
+            worker = threading.Thread(
+                target=self._run_and_deliver,
+                args=(chat_id, text, cfg),
+                name="hackidea-run",
+                daemon=True,
+            )
+            worker.start()
+        except Exception:
+            with self._run_lock:
+                self._run_active = False
+            raise
 
-        report_path = run_dir / "final_report.md"
-        if not report_path.exists():
-            self.send(chat_id, "The run finished, but no report file was written.")
-            return
+    def _run_and_deliver(self, chat_id: int, text: str, cfg: Config) -> None:
         try:
-            self.send_document(chat_id, report_path, "Your HackIdea report is ready.")
-        except (Exception, SystemExit) as exc:
-            # The pipeline succeeded; keep that distinct from a Telegram upload failure.
-            print(f"[hackidea-telegram] report delivery failed ({type(exc).__name__})", file=sys.stderr, flush=True)
             try:
-                self.send(chat_id, "The run completed, but I couldn't attach the report. Here it is as text instead:")
-                self.send(chat_id, report_path.read_text(encoding="utf-8"))
-            except (Exception, SystemExit) as send_exc:
-                print(f"[hackidea-telegram] text fallback failed ({type(send_exc).__name__})", file=sys.stderr, flush=True)
+                run_dir = Runner(cfg).run(context_text=text)
+            except (Exception, SystemExit) as exc:
+                print(f"[hackidea-telegram] run failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+                try:
+                    self.send(chat_id, f"The run failed. {safe_failure_hint(exc)}")
+                except (Exception, SystemExit) as send_exc:
+                    print(f"[hackidea-telegram] failure notice delivery failed ({type(send_exc).__name__})", file=sys.stderr, flush=True)
+                return
+
+            report_path = run_dir / "final_report.md"
+            if not report_path.exists():
+                self.send(chat_id, "The run finished, but no report file was written.")
+                return
+            try:
+                self.send_document(chat_id, report_path, "Your HackIdea report is ready.")
+            except (Exception, SystemExit) as exc:
+                # The pipeline succeeded; keep that distinct from a Telegram upload failure.
+                print(f"[hackidea-telegram] report delivery failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+                try:
+                    self.send(chat_id, "The run completed, but I couldn't attach the report. Here it is as text instead:")
+                    self.send(chat_id, report_path.read_text(encoding="utf-8"))
+                except (Exception, SystemExit) as send_exc:
+                    print(f"[hackidea-telegram] text fallback failed ({type(send_exc).__name__})", file=sys.stderr, flush=True)
+        except (Exception, SystemExit) as exc:
+            print(f"[hackidea-telegram] run delivery failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+        finally:
+            with self._run_lock:
+                self._run_active = False
 
     def run_forever(self) -> None:
         print("[hackidea-telegram] polling for Telegram messages", file=sys.stderr, flush=True)
